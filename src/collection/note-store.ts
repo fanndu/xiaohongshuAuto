@@ -67,13 +67,21 @@ export class NoteStore {
   }
 
   addMany(items: readonly NoteInput[]): number {
-    let added = 0;
+    const initialSize = this.records.length;
     for (const item of items) {
       const candidate = this.candidate(item);
       if (!candidate) continue;
 
       const idIndex = candidate.id ? this.byId.get(candidate.id) : undefined;
       const urlIndex = candidate.noteUrl ? this.byUrl.get(candidate.noteUrl) : undefined;
+      const matchedIndexes = [...new Set([idIndex, urlIndex].filter((index): index is number => index !== undefined))];
+      const identities = new Set(this.identitiesFor(item, candidate.noteUrl));
+      for (const matchedIndex of matchedIndexes) {
+        const matched = this.records[matchedIndex];
+        if (matched) this.identitiesFor(matched).forEach(id => identities.add(id));
+      }
+      if (identities.size > 1) continue;
+
       if (idIndex !== undefined && urlIndex !== undefined && idIndex !== urlIndex) {
         const earliestIndex = Math.min(idIndex, urlIndex);
         const laterIndex = Math.max(idIndex, urlIndex);
@@ -91,7 +99,6 @@ export class NoteStore {
         this.records.push(candidate);
         const newIndex = this.records.length - 1;
         this.index(candidate, newIndex);
-        added += 1;
         continue;
       }
 
@@ -101,7 +108,7 @@ export class NoteStore {
       this.records[index] = merged;
       this.index(merged, index);
     }
-    return added;
+    return Math.max(0, this.records.length - initialSize);
   }
 
   private candidate(item: NoteInput): NoteRecord | null {
@@ -132,6 +139,11 @@ export class NoteStore {
     this.byId.clear();
     this.byUrl.clear();
     this.records.forEach((record, index) => this.index(record, index));
+  }
+
+  private identitiesFor(item: Pick<NoteInput, 'id' | 'noteUrl'>, normalizedUrl?: string): string[] {
+    const noteUrl = normalizedUrl ?? normalizeNoteUrl(string(item.noteUrl));
+    return [...new Set([safeId(item.id), safeId(extractNoteId(noteUrl))].filter(Boolean))];
   }
 
   private merge(existing: NoteRecord, later: NoteRecord): NoteRecord {

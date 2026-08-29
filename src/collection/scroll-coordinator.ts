@@ -181,20 +181,30 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
   }
 }
 
-function isVisible(element: Element, win: Window): boolean {
+function hasVisibleStyles(element: Element, win: Window): boolean {
+  if (!element.isConnected) return false;
   for (let current: Element | null = element; current; current = current.parentElement) {
     if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
     const style = win.getComputedStyle(current);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
-    if (style.opacity === '0') return false;
-  }
-  const rect = element.getBoundingClientRect();
-  if (rect.width > 0 && rect.height > 0) {
-    const viewportWidth = win.innerWidth;
-    const viewportHeight = win.innerHeight;
-    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewportWidth || rect.top >= viewportHeight) return false;
+    if (style.opacity && Number(style.opacity) === 0) return false;
   }
   return true;
+}
+
+function intersectsViewport(element: Element, win: Window): boolean {
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  return !(rect.right <= 0 || rect.bottom <= 0 || rect.left >= win.innerWidth || rect.top >= win.innerHeight);
+}
+
+function isVisible(element: Element, win: Window): boolean {
+  if (!hasVisibleStyles(element, win)) return false;
+  if (intersectsViewport(element, win)) return true;
+  for (const descendant of element.querySelectorAll('*')) {
+    if (hasVisibleStyles(descendant, win) && intersectsViewport(descendant, win)) return true;
+  }
+  return false;
 }
 
 function isChallengeContainer(element: Element): boolean {

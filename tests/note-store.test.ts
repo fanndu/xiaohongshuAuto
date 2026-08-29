@@ -70,6 +70,17 @@ describe('NoteStore', () => {
     expect(store.size).toBe(1);
   });
 
+  it('returns the net count of unique records added by a same-batch bridge', () => {
+    const store = new NoteStore();
+
+    expect(store.addMany([
+      note({ id: 'net-id' }),
+      note({ noteUrl: 'https://www.xiaohongshu.com/explore/net-id' }),
+      note({ id: 'net-id', noteUrl: 'https://www.xiaohongshu.com/explore/net-id' }),
+    ])).toBe(1);
+    expect(store.size).toBe(1);
+  });
+
   it('rejects mismatched supplied IDs and URL IDs without poisoning stored records', () => {
     const mismatched = note({
       id: 'declared-id',
@@ -84,6 +95,30 @@ describe('NoteStore', () => {
     crossCall.addMany([note({ id: 'declared-id', title: 'existing' })]);
     expect(crossCall.addMany([mismatched])).toBe(0);
     expect(crossCall.values()).toEqual([note({ id: 'declared-id', title: 'existing' })]);
+  });
+
+  it('atomically rejects a different ID that matches a stored fallback URL', () => {
+    const store = new NoteStore();
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/fallback';
+    store.addMany([note({ id: 'A', noteUrl: fallbackUrl, title: 'A evidence' })]);
+
+    expect(store.addMany([note({ id: 'B', noteUrl: fallbackUrl, title: 'B evidence' })])).toBe(0);
+    expect(store.values()).toEqual([note({ id: 'A', noteUrl: fallbackUrl, title: 'A evidence' })]);
+  });
+
+  it('does not delete or enrich conflicting records when a bridge matches both', () => {
+    const store = new NoteStore();
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/bridge';
+    store.addMany([
+      note({ id: 'A', title: 'A evidence' }),
+      note({ id: 'B', noteUrl: fallbackUrl, title: 'B evidence' }),
+    ]);
+
+    expect(store.addMany([note({ id: 'A', noteUrl: fallbackUrl, title: 'bad bridge', type: 'video' })])).toBe(0);
+    expect(store.values()).toEqual([
+      note({ id: 'A', title: 'A evidence' }),
+      note({ id: 'B', noteUrl: fallbackUrl, title: 'B evidence' }),
+    ]);
   });
 
   it('deduplicates normalized query and hash URL variants when no note ID is available', () => {

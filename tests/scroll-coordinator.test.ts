@@ -29,6 +29,19 @@ function environment(overrides: Partial<ScrollEnvironment> = {}): ScrollEnvironm
   return result;
 }
 
+const challengeSelector = '[role="dialog"], [aria-modal="true"], [class*="captcha"], [class*="verify"], [class*="verification"], [class*="access-frequency"], [class*="risk-control"]';
+const visibleRect = (): DOMRect => ({
+  x: 0, y: 0, top: 0, left: 0, right: 100, bottom: 100, width: 100, height: 100,
+  toJSON: () => ({}),
+}) as DOMRect;
+
+function mockVisibleCandidate(): HTMLElement {
+  const candidate = document.querySelector<HTMLElement>(challengeSelector);
+  if (!candidate) throw new Error('Expected a challenge candidate');
+  vi.spyOn(candidate, 'getBoundingClientRect').mockReturnValue(visibleRect());
+  return candidate;
+}
+
 describe('collectUntilStable', () => {
   it('completes after exactly three bottom rounds without new notes and reports each read', async () => {
     const env = environment();
@@ -298,26 +311,35 @@ describe('browserScrollEnvironment', () => {
     expect(env.hasAccessBlock()).toBe(false);
 
     document.body.innerHTML = '<div role="dialog">请完成验证</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<section class="captcha-modal">安全验证码</section>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<section class="verify-dialog">请完成验证</section>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div role="dialog" class="access-frequency-dialog">访问频繁，请稍后再试</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
   });
 
   it('blocks genuine dialog and CAPTCHA challenges without treating verification articles as blocks', () => {
     const env = browserScrollEnvironment;
     document.body.innerHTML = '<div role="dialog">人机验证</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div class="captcha-modal">验证码</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div class="access-frequency-dialog">访问频繁</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div class="risk-control-modal">操作频繁</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div class="verification-overlay">人机验证</div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<article class="verify-article">安全验证最佳实践</article>';
     expect(env.hasAccessBlock()).toBe(false);
@@ -340,16 +362,18 @@ describe('browserScrollEnvironment', () => {
   it('lets strong challenge phrases win over help footers but suppresses ambiguous safety tutorials', () => {
     const env = browserScrollEnvironment;
     document.body.innerHTML = '<div role="dialog">人机验证<footer>帮助与说明</footer></div>';
+    mockVisibleCandidate();
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div role="dialog">安全验证最佳实践和帮助说明</div>';
     expect(env.hasAccessBlock()).toBe(false);
   });
 
-  it('ignores transparent or positive-size offscreen dialogs while keeping jsdom zero-size dialogs visible', () => {
+  it('requires rendered candidate or descendant area and ignores transparent/offscreen dialogs', () => {
     const env = browserScrollEnvironment;
     document.body.innerHTML = '<div style="opacity: 0"><div role="dialog">人机验证</div></div>';
     expect(env.hasAccessBlock()).toBe(false);
     document.body.innerHTML = '<div role="dialog">人机验证</div>';
+    expect(env.hasAccessBlock()).toBe(false);
     const dialog = document.querySelector('[role="dialog"]')!;
     vi.spyOn(dialog, 'getBoundingClientRect').mockReturnValue({
       x: 0, y: 10_000, top: 10_000, left: 0, right: 100, bottom: 10_100, width: 100, height: 100,
@@ -357,6 +381,11 @@ describe('browserScrollEnvironment', () => {
     });
     expect(env.hasAccessBlock()).toBe(false);
     vi.restoreAllMocks();
+    mockVisibleCandidate();
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div role="dialog">人机验证<button>继续</button></div>';
+    const child = document.querySelector('button')!;
+    vi.spyOn(child, 'getBoundingClientRect').mockReturnValue(visibleRect());
     expect(env.hasAccessBlock()).toBe(true);
   });
 
