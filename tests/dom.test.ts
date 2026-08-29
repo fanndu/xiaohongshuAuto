@@ -581,4 +581,16 @@ describe('parseDomPage', () => {
       hasWorksContainer: false, notes: [],
     });
   });
+
+  it('rejects Bob header and works nested under an Alice-owned user-info root', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <div class="user-info" data-user-id="alice">
+        <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Forged Bob</span></section>
+        <section id="userPostedFeeds" data-user-id="bob"><article class="note-item"><a href="/explore/alice-owned"></a></article></section>
+      </div>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasProfileEvidence: false, hasWorksContainer: false, notes: [],
+    });
+  });
 });

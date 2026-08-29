@@ -319,6 +319,13 @@ function supportedNotesContainer(value: unknown): boolean {
   return Boolean(container && ownKeys(container).some(key => /^\d+$/.test(key)));
 }
 
+function indexedValue(value: unknown, index: number): unknown {
+  const container = unwrap(value);
+  if (Array.isArray(container)) return index >= 0 && index < container.length ? container[index] : undefined;
+  const map = rawRecord(container);
+  return map && hasOwn(map, String(index)) ? own(map, String(index)) : undefined;
+}
+
 function flattenNotes(value: unknown): unknown[] {
   const flattened: unknown[] = [];
   const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
@@ -437,7 +444,20 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
     : [];
   const countFor = (type: string) => parseCount(string(own(interactions.find(item => string(own(item, 'type')) === type) ?? null, 'count')));
 
-  const identities = new Set([own(basic, 'userId'), own(userPageData, 'userId'), own(page, 'userId')].map(string).filter(Boolean));
+  const activeStatePresent = hasOwn(page, 'activeTab') || hasOwn(page, 'noteQueries');
+  const activeTab = record(own(page, 'activeTab'));
+  const activeIndex = unwrap(own(activeTab, 'index'));
+  const activeQuery = string(own(activeTab, 'query'));
+  const activeIndexValid = typeof activeIndex === 'number' && Number.isInteger(activeIndex) && activeIndex >= 0;
+  const activeQueryRecord = activeIndexValid ? record(indexedValue(own(page, 'noteQueries'), activeIndex)) : null;
+  const activeQueryIdentity = string(own(activeQueryRecord, 'userId'));
+  const activeBucket = activeIndexValid ? indexedValue(own(page, 'notes'), activeIndex) : undefined;
+  const activeBucketValid = activeStatePresent && activeQuery === 'note' && Boolean(activeQueryIdentity)
+    && activeBucket !== undefined && supportedNotesContainer(activeBucket);
+
+  const identities = new Set([
+    own(basic, 'userId'), own(userPageData, 'userId'), own(page, 'userId'), activeQueryIdentity,
+  ].map(string).filter(Boolean));
   const identityStatus = read.budgetExhausted ? 'budget_exhausted'
     : identities.size > 1 ? 'conflict' : identities.size === 1 ? 'valid' : 'missing';
   const userId = identityStatus === 'valid' ? [...identities][0] ?? '' : '';
@@ -446,8 +466,10 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
   const siblingNotes = own(page, 'notes');
   const parentIdentity = string(own(page, 'userId'));
   const selectedNotes = pageNotesExplicit && supportedNotesContainer(pageNotes) ? pageNotes
-    : !pageNotesExplicit && Boolean(userId) && Boolean(parentIdentity) && parentIdentity === userId
-      && supportedNotesContainer(siblingNotes) ? siblingNotes
+    : !pageNotesExplicit && activeStatePresent && activeBucketValid && Boolean(userId)
+      && Boolean(parentIdentity) && parentIdentity === userId && activeQueryIdentity === userId ? activeBucket
+      : !pageNotesExplicit && !activeStatePresent && Boolean(userId) && Boolean(parentIdentity) && parentIdentity === userId
+        && supportedNotesContainer(siblingNotes) ? siblingNotes
       : undefined;
   const mappedNotes = identityStatus !== 'conflict' && identityStatus !== 'budget_exhausted' && selectedNotes !== undefined
     ? flattenNotes(selectedNotes).map(note => safelyMapNote(note, userId)) : [];

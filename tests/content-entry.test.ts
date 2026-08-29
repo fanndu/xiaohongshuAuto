@@ -7,7 +7,7 @@ describe('isProfileUrl', () => {
   it.each([
     'https://www.xiaohongshu.com/user/profile/abc123',
     'https://www.xiaohongshu.com/user/profile/abc123/',
-    'https://creator.xiaohongshu.com/user/profile/abc123?tab=notes#feed',
+    'https://creator.xiaohongshu.com/user/profile/abc123?tab=note#feed',
     'https://xiaohongshu.com/user/profile/abc123',
   ])('accepts a canonical HTTPS profile URL: %s', url => {
     expect(isProfileUrl(url)).toBe(true);
@@ -27,6 +27,10 @@ describe('isProfileUrl', () => {
     'https://www.xiaohongshu.com/user/profile/a%2Fb',
     'https://www.xiaohongshu.com/user/profile/%00',
     'https://www.xiaohongshu.com/user/profile/%',
+    'https://www.xiaohongshu.com/user/profile/abc123?tab=fav',
+    'https://www.xiaohongshu.com/user/profile/abc123?tab=liked',
+    'https://www.xiaohongshu.com/user/profile/abc123?tab=notes',
+    'https://www.xiaohongshu.com/user/profile/abc123?tab=note&tab=fav',
     'not a URL',
   ])('rejects non-profile or unsafe URL: %s', url => {
     expect(isProfileUrl(url)).toBe(false);
@@ -35,7 +39,7 @@ describe('isProfileUrl', () => {
 
 describe('canonicalProfileRoute', () => {
   it('uses one canonical URL for equivalent safe profile routes', () => {
-    expect(canonicalProfileRoute('https://creator.xiaohongshu.com/user/profile/Alice_01/?tab=notes#feed'))
+    expect(canonicalProfileRoute('https://creator.xiaohongshu.com/user/profile/Alice_01/?tab=note#feed'))
       .toEqual({ key: 'Alice_01', url: 'https://www.xiaohongshu.com/user/profile/Alice_01' });
   });
 
@@ -55,8 +59,8 @@ describe('createProfileRouteLifecycle', () => {
     const mount = vi.fn(() => unmount);
     const lifecycle = createProfileRouteLifecycle(mount);
 
-    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=notes');
-    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=notes');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=note');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=note');
 
     expect(mount).toHaveBeenCalledTimes(1);
     expect(unmount).not.toHaveBeenCalled();
@@ -85,12 +89,28 @@ describe('createProfileRouteLifecycle', () => {
     ]);
   });
 
+  it('unmounts on a non-work tab for the same profile and remounts on return', () => {
+    const calls: string[] = [];
+    const lifecycle = createProfileRouteLifecycle(url => {
+      calls.push(`mount:${url}`);
+      return () => calls.push(`unmount:${url}`);
+    });
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=fav&subTab=note');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice?tab=note');
+    expect(calls).toEqual([
+      'mount:https://www.xiaohongshu.com/user/profile/alice',
+      'unmount:https://www.xiaohongshu.com/user/profile/alice',
+      'mount:https://www.xiaohongshu.com/user/profile/alice',
+    ]);
+  });
+
   it('does not remount query, hash, host, or trailing-slash variants of the same profile', () => {
     const unmount = vi.fn();
     const mount = vi.fn(() => unmount);
     const lifecycle = createProfileRouteLifecycle(mount);
 
-    lifecycle.sync('https://creator.xiaohongshu.com/user/profile/alice/?tab=notes#feed');
+    lifecycle.sync('https://creator.xiaohongshu.com/user/profile/alice/?tab=note#feed');
     lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice');
 
     expect(mount).toHaveBeenCalledTimes(1);

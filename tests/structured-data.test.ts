@@ -656,4 +656,30 @@ describe('parseStructuredPage', () => {
       id: 'same-note', type: 'unknown', exportNotes: ['作品类型证据冲突'],
     }]);
   });
+
+  it('uses only the active reactive note bucket and reconciles its query identity', () => {
+    const state = { user: {
+      userPageData: { _rawValue: { basicInfo: { value: { nickname: 'Bob' } }, interactions: [] } },
+      userId: { value: 'bob' },
+      activeTab: { _value: { index: { value: 3 }, query: { value: 'note' } } },
+      noteQueries: { value: { 0: { userId: 'alice' }, 1: { userId: 'alice' }, 2: { userId: 'alice' }, 3: { _rawValue: { userId: { value: 'bob' } } }, 4: { userId: 'alice' } } },
+      notes: { value: [[{ id: 'stale-0' }], [{ id: 'stale-1' }], [{ id: 'stale-2' }], [{ id: 'active-3' }], [{ id: 'stale-4' }]] },
+    } };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state)};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', identityStatus: 'valid', hasNotesContainer: true, notes: [{ id: 'active-3' }],
+    });
+  });
+
+  it.each([
+    [{ index: 5, query: 'note' }, { 0: { userId: 'bob' } }],
+    [{ index: 0, query: 'fav' }, { 0: { userId: 'bob' } }],
+    [{ index: 0, query: 'note' }, { 0: { userId: 'alice' } }],
+  ])('fails closed for invalid active multi-bucket state', (activeTab, noteQueries) => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
+      userId: 'bob', userPageData: { basicInfo: { nickname: 'Bob' }, interactions: [] }, activeTab, noteQueries,
+      notes: [[{ id: 'should-not-use' }]],
+    } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({ hasNotesContainer: false, notes: [] });
+  });
 });

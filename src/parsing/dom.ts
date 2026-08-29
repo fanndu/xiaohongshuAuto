@@ -137,7 +137,7 @@ function statRaw(scope: ParentNode, label: string, directScopeOnly = false): str
   return '';
 }
 
-const WORKS_SELECTOR = '[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page';
+const WORKS_SELECTOR = '[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page, #userPostedFeeds';
 const PROFILE_ROOT_SELECTORS = [
   '[data-testid="profile-page"]',
   '[data-testid="profile-scope"]',
@@ -148,6 +148,7 @@ const PROFILE_ROOT_SELECTORS = [
 ];
 const PROFILE_HEADER_SELECTORS = ['[data-testid="profile-header"]', 'section.user', '.user-info'];
 const PROFILE_SCOPE_SELECTOR = '[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page';
+const OWNERSHIP_ROOT_SELECTOR = PROFILE_ROOT_SELECTORS.join(',');
 
 function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const values = new Set<string>();
@@ -202,7 +203,8 @@ function splitCurrentCandidates(candidates: readonly Element[], userId: string, 
 function validatedProfileScope(root: Element | null, userId: string, base: string): Element | null {
   const scope = root?.closest(PROFILE_SCOPE_SELECTOR) ?? root;
   if (!scope) return null;
-  for (let candidate: Element | null = scope; candidate; candidate = candidate.parentElement?.closest(PROFILE_SCOPE_SELECTOR) ?? null) {
+  for (let candidate: Element | null = root; candidate; candidate = candidate.parentElement) {
+    if (!candidate.matches(OWNERSHIP_ROOT_SELECTOR)) continue;
     const identity = elementIdentity(candidate, base);
     if (identity.identityStatus === 'conflict') return null;
     if (identity.identityStatus === 'valid' && identity.userId !== userId) return null;

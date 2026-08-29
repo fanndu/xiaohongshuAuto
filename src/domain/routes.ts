@@ -21,6 +21,9 @@ export function canonicalProfileRoute(value: string): ProfileRoute | null {
     // Route identifiers are deliberately ASCII-only. URL.pathname preserves percent
     // escapes, so this also rejects encoded separators and encoded safe characters.
     if (!id || !/^[A-Za-z0-9_-]+$/.test(id)) return null;
+    const tabs = url.searchParams.getAll('tab');
+    // Only the default works view or the explicit works tab is safe to collect.
+    if (tabs.length > 1 || (tabs.length === 1 && tabs[0] !== 'note')) return null;
     return { key: id, url: `https://www.xiaohongshu.com/user/profile/${id}` };
   } catch {
     return null;

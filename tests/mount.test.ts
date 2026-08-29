@@ -75,6 +75,30 @@ describe('mountCollector', () => {
     cleanup();
   });
 
+  it('mounts and exports only the active reactive note bucket', async () => {
+    const state = { user: {
+      userPageData: { _rawValue: { basicInfo: { value: { nickname: 'Bob' } }, interactions: [] } },
+      userId: { value: 'bob' },
+      activeTab: { value: { index: 1, query: 'note' } },
+      noteQueries: { _value: [{ userId: 'alice' }, { value: { userId: 'bob' } }, { userId: 'alice' }] },
+      notes: { value: [[{ id: 'stale-before' }], [{ id: 'active-current' }], [{ id: 'stale-after' }]] },
+    } };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state)};</script>`;
+    const control = { destroy: vi.fn(), render: vi.fn() };
+    const exported: Array<{ profile: { accountName: string }; notes: Array<{ id: string }> }> = [];
+    const cleanup = mountCollector('https://www.xiaohongshu.com/user/profile/bob', undefined, {
+      createControl: actions => Object.assign(control, { actions }),
+      environment: { atBottom: () => true, hasAccessBlock: () => false, scrollToBottom: () => undefined, wait: () => Promise.resolve() },
+      exportResult: async result => { exported.push(result); },
+    });
+    await (control as typeof control & { actions: { start(): Promise<void> } }).actions.start();
+    expect(exported).toEqual([{
+      profile: expect.objectContaining({ accountName: 'Bob' }),
+      notes: [expect.objectContaining({ id: 'active-current' })],
+    }]);
+    cleanup();
+  });
+
   it('rejects identity-only structured state and stale structured plus DOM state', () => {
     const createControl = vi.fn();
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userPageData: { userId: 'alice', basicInfo: {}, interactions: [], notes: [] } } })};</script>`;
