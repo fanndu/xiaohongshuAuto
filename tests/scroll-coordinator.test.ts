@@ -217,8 +217,20 @@ describe('browserScrollEnvironment', () => {
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<section class="verify-dialog">请完成验证</section>';
     expect(env.hasAccessBlock()).toBe(true);
-    document.body.innerHTML = '<div class="access-frequency-dialog">访问频繁，请稍后再试</div>';
+    document.body.innerHTML = '<div role="dialog" class="access-frequency-dialog">访问频繁，请稍后再试</div>';
     expect(env.hasAccessBlock()).toBe(true);
+  });
+
+  it('blocks genuine dialog and CAPTCHA challenges without treating verification articles as blocks', () => {
+    const env = browserScrollEnvironment;
+    document.body.innerHTML = '<div role="dialog">人机验证</div>';
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div class="captcha-modal">验证码</div>';
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<article class="verify-article">安全验证最佳实践</article>';
+    expect(env.hasAccessBlock()).toBe(false);
+    document.body.innerHTML = '<main><h1>验证码帮助中心</h1><p>人机验证教程</p></main>';
+    expect(env.hasAccessBlock()).toBe(false);
   });
 
   it('ignores challenge-looking text hidden by itself or an ancestor, and tutorial/help text', () => {

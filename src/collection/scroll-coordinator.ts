@@ -130,6 +130,14 @@ function isVisible(element: Element, win: Window): boolean {
   return true;
 }
 
+function isChallengeContainer(element: Element): boolean {
+  if (element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true') return true;
+  const tokens = [...element.classList];
+  const hasVerificationToken = tokens.some(token => /(captcha|verify|verification)/i.test(token));
+  const hasOverlayToken = tokens.some(token => /(modal|dialog|popup|container|mask|challenge)/i.test(token));
+  return hasVerificationToken && hasOverlayToken;
+}
+
 /** Browser adapter that detects only modal-like verification and rate-limit challenges. */
 function createBrowserScrollEnvironment(doc: Document, win: Window): ScrollEnvironment {
   return {
@@ -143,17 +151,15 @@ function createBrowserScrollEnvironment(doc: Document, win: Window): ScrollEnvir
       const candidates = doc.querySelectorAll([
         '[role="dialog"]',
         '[aria-modal="true"]',
-        '.captcha-modal',
         '[class*="captcha"]',
         '[class*="verify"]',
         '[class*="verification"]',
-        '[class*="access-frequency"]',
-        '[class*="risk-control"]',
       ].join(','));
       return [...candidates].some(element => {
         const text = element.textContent?.trim() ?? '';
-        return isVisible(element, win)
-          && /(请完成验证|安全验证|访问频繁|操作频繁)/.test(text)
+        return isChallengeContainer(element)
+          && isVisible(element, win)
+          && /(人机验证|验证码|请完成验证|安全验证|访问频繁|操作频繁)/.test(text)
           && !/(教程|帮助|说明|如何(?:完成)?验证)/.test(text);
       });
     },
