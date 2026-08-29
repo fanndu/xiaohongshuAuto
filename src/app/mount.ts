@@ -1,23 +1,39 @@
 import { browserScrollEnvironment, collectUntilStable } from '../collection/scroll-coordinator';
 import { formatLocalDateTime } from '../domain/normalize';
 import { canonicalProfileRoute } from '../domain/routes';
+import type { CollectionResult } from '../domain/types';
+import type { ScrollEnvironment } from '../collection/scroll-coordinator';
 import { parseDomPage } from '../parsing/dom';
 import { mergeProfile } from '../parsing/merge';
 import { parseStructuredPage } from '../parsing/structured-data';
-import { FloatingControl } from '../ui/floating-control';
+import { FloatingControl, type UiActions } from '../ui/floating-control';
 import { CollectorController } from './collector-controller';
 
 export type Unmount = () => void;
 
+type MountedControl = Pick<FloatingControl, 'destroy' | 'render'>;
+
+/** Optional boundaries for integration tests; production uses all defaults. */
+export interface MountCollectorOptions {
+  createControl?: (actions: UiActions) => MountedControl;
+  now?: () => Date;
+  environment?: ScrollEnvironment;
+  exportResult?: (result: CollectionResult) => Promise<void>;
+}
+
 /** Mounts the collector UI and binds it to the current profile document. */
-export function mountCollector(url = location.href, lifecycleSignal?: AbortSignal): Unmount {
+export function mountCollector(
+  url = location.href,
+  lifecycleSignal?: AbortSignal,
+  options: MountCollectorOptions = {},
+): Unmount {
   const route = canonicalProfileRoute(url);
   if (!route) throw new TypeError('Collector can only mount on a safe profile route');
   const profileUrl = route.url;
   let controller!: CollectorController;
-  let ui: FloatingControl | undefined;
+  let ui: MountedControl | undefined;
   try {
-    ui = new FloatingControl({
+    ui = (options.createControl ?? (actions => new FloatingControl(actions)))({
       start: () => controller.start(),
       stop: () => controller.stop(),
       retry: () => controller.retry(),
@@ -32,7 +48,12 @@ export function mountCollector(url = location.href, lifecycleSignal?: AbortSigna
       ui,
       readProfile: () => {
         const page = readPages();
-        return mergeProfile(page.structured.profile, page.dom.profile, profileUrl, formatLocalDateTime());
+        return mergeProfile(
+          page.structured.profile,
+          page.dom.profile,
+          profileUrl,
+          formatLocalDateTime(options.now ? options.now() : new Date()),
+        );
       },
       collect: (signal, onProgress) => {
         const first = readPages();
@@ -44,16 +65,16 @@ export function mountCollector(url = location.href, lifecycleSignal?: AbortSigna
           },
           onProgress,
           signal,
-          environment: browserScrollEnvironment,
+          environment: options.environment ?? browserScrollEnvironment,
         },
         );
       },
       // WXT 0.20.27 inlines content-script dynamic imports as a lazy module initializer;
       // keeping this import here defers workbook/ExcelJS evaluation until export is requested.
-      exportResult: async result => (await import('../export/workbook')).downloadWorkbook(
-        result,
-        lifecycleSignal ? { signal: lifecycleSignal } : {},
-      ),
+      exportResult: options.exportResult ?? (async result => (await import('../export/workbook')).downloadWorkbook(
+          result,
+          lifecycleSignal ? { signal: lifecycleSignal } : {},
+        )),
     });
     ui.render({ phase: 'ready' });
 

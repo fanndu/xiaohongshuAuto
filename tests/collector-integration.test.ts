@@ -2,15 +2,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CollectorController } from '../src/app/collector-controller';
-import { collectUntilStable, type ScrollEnvironment } from '../src/collection/scroll-coordinator';
+import { mountCollector } from '../src/app/mount';
 import { formatLocalDateTime } from '../src/domain/normalize';
 import type { CollectionResult } from '../src/domain/types';
 import { buildWorkbookBuffer } from '../src/export/workbook';
-import { mergeProfile } from '../src/parsing/merge';
-import { parseDomPage } from '../src/parsing/dom';
-import { parseStructuredPage } from '../src/parsing/structured-data';
-import type { UiState } from '../src/ui/floating-control';
+import type { ScrollEnvironment } from '../src/collection/scroll-coordinator';
+import type { UiActions, UiState } from '../src/ui/floating-control';
 
 const profileUrl = 'https://www.xiaohongshu.com/user/profile/azhe';
 const fixture = readFileSync(
@@ -18,6 +15,14 @@ const fixture = readFileSync(
   'utf8',
 );
 const originalBodyHtml = document.body.innerHTML;
+
+interface FakeControl {
+  actions: UiActions;
+  destroyed: boolean;
+  states: UiState[];
+  destroy(): void;
+  render(state: UiState): void;
+}
 
 function fakeScrollEnvironment(): ScrollEnvironment & { scrolls: number } {
   const environment = {
@@ -31,43 +36,31 @@ function fakeScrollEnvironment(): ScrollEnvironment & { scrolls: number } {
 }
 
 afterEach(() => {
+  document.querySelector('#xhs-profile-collector')?.remove();
   document.body.innerHTML = originalBodyHtml;
 });
 
 describe('collector module integration', () => {
-  it('runs the controller through stable collection and automatic URL-only export', async () => {
+  it('mounts the real production flow and automatically exports its merged stable result', async () => {
     document.body.innerHTML = fixture;
     const environment = fakeScrollEnvironment();
-    // Mounting renders the initial ready state; the controller owns the later run states.
-    const states: UiState[] = [{ phase: 'ready' }];
     const exported: CollectionResult[] = [];
+    let control: FakeControl | undefined;
     let workbook: ExcelJS.Workbook | undefined;
-    const collectedAt = formatLocalDateTime(new Date('2026-08-29T04:34:56.000Z'), -480);
-
-    const readPage = () => ({
-      structured: parseStructuredPage(document, profileUrl),
-      dom: parseDomPage(document, profileUrl),
-    });
-    const controller = new CollectorController({
-      ui: { render: state => { states.push({ ...state }); } },
-      readProfile: () => {
-        const page = readPage();
-        return mergeProfile(page.structured.profile, page.dom.profile, profileUrl, collectedAt);
+    const lifecycle = new AbortController();
+    const cleanup = mountCollector(profileUrl, lifecycle.signal, {
+      createControl: actions => {
+        control = {
+          actions,
+          destroyed: false,
+          states: [],
+          render(state) { this.states.push({ ...state }); },
+          destroy() { this.destroyed = true; },
+        };
+        return control;
       },
-      collect: (signal, onProgress) => {
-        const initial = readPage();
-        return collectUntilStable({
-          environment,
-          intervalMs: 0,
-          signal,
-          onProgress,
-          seed: [...initial.structured.notes, ...initial.dom.notes],
-          readNotes: () => {
-            const page = readPage();
-            return [...page.structured.notes, ...page.dom.notes];
-          },
-        });
-      },
+      now: () => new Date('2026-08-29T04:34:56.000Z'),
+      environment,
       exportResult: async result => {
         exported.push(result);
         const buffer = await buildWorkbookBuffer(result);
@@ -76,9 +69,11 @@ describe('collector module integration', () => {
       },
     });
 
-    await controller.start();
+    expect(control?.states).toEqual([{ phase: 'ready' }]);
+    if (!control) throw new Error('Expected injected control');
+    await control.actions.start();
 
-    expect(states).toEqual([
+    expect(control.states).toEqual([
       { phase: 'ready' },
       { phase: 'collecting', count: 0 },
       { phase: 'collecting', count: 1 },
@@ -98,7 +93,7 @@ describe('collector module integration', () => {
         following: { raw: '128', value: 128 },
         followers: { raw: '1.3万', value: 13000 },
         likedAndCollected: { raw: '8.6万', value: 86000 },
-        collectedAt: '2026-08-29T12:34:56+08:00',
+        collectedAt: formatLocalDateTime(new Date('2026-08-29T04:34:56.000Z')),
         exportNotes: [],
       },
       notes: [{
@@ -127,8 +122,7 @@ describe('collector module integration', () => {
     expect(profileSheet.getCell('B3').text).toBe('旅行摄影阿哲');
     expect(profileSheet.getCell('B10').text).toBe('1.3万');
     expect(profileSheet.getCell('B11').value).toBe(13000);
-    expect(profileSheet.getCell('B15').text).toBe('2026-08-29T12:34:56+08:00');
-
+    expect(profileSheet.getCell('B15').text).toBe(formatLocalDateTime(new Date('2026-08-29T04:34:56.000Z')));
     expect(notesSheet.rowCount).toBe(2);
     expect(notesSheet.getCell('B2').text).toBe('雪山日出');
     expect(notesSheet.getCell('C2').hyperlink).toBe('https://www.xiaohongshu.com/explore/abc123');
@@ -137,5 +131,8 @@ describe('collector module integration', () => {
     expect(notesSheet.getCell('F2').text).toBe('2.3万');
     expect(notesSheet.getCell('G2').value).toBe(23000);
     expect(notesSheet.getCell('H2').hyperlink).toBe('https://img.example/cover.jpg');
+
+    cleanup();
+    expect(control.destroyed).toBe(true);
   });
 });
