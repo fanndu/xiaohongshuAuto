@@ -115,7 +115,12 @@ function labelElement(item: Element, label: string): Element | null {
 }
 
 function statRaw(scope: ParentNode, label: string, directScopeOnly = false): string {
-  const items = scope.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]');
+  const items = directScopeOnly && scope instanceof Element
+    ? [...scope.children].flatMap(child => [
+      ...(child.matches('.data-info') ? [...child.querySelectorAll('.data-item')] : []),
+      ...(child.matches('[data-testid="profile-stat"]') ? [child] : []),
+    ])
+    : [...scope.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]')];
   for (const item of items) {
     if (directScopeOnly && item.closest(PROFILE_HEADER_SELECTORS.join(','))) continue;
     const semanticLabel = labelElement(item, label);
@@ -195,9 +200,11 @@ function splitCurrentCandidates(candidates: readonly Element[], userId: string, 
 function validatedProfileScope(root: Element | null, userId: string, base: string): Element | null {
   const scope = root?.closest(PROFILE_SCOPE_SELECTOR) ?? root;
   if (!scope) return null;
-  const identity = elementIdentity(scope, base);
-  if (identity.identityStatus === 'conflict') return null;
-  if (identity.identityStatus === 'valid' && identity.userId !== userId) return null;
+  for (let candidate: Element | null = scope; candidate; candidate = candidate.parentElement?.closest(PROFILE_SCOPE_SELECTOR) ?? null) {
+    const identity = elementIdentity(candidate, base);
+    if (identity.identityStatus === 'conflict') return null;
+    if (identity.identityStatus === 'valid' && identity.userId !== userId) return null;
+  }
   return scope;
 }
 

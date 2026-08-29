@@ -530,4 +530,29 @@ describe('parseDomPage', () => {
       profile: { following: { raw: '', value: null } },
     });
   });
+
+  it('rejects Bob content nested through an unbound scope into an Alice-bound ancestor scope', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="alice">
+      <section class="profile-page">
+        <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+        <section class="feeds-page"><article class="note-item"><a href="/explore/alice-nested"></a></article></section>
+      </section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasProfileEvidence: false, hasWorksContainer: false, notes: [], profile: { accountName: '' },
+    });
+  });
+
+  it('uses only direct scope stat children, excluding nested scopes, works, and wrappers', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <section class="profile-page" data-user-id="alice"><div class="data-info"><div class="data-item"><span>关注</span><strong>999</strong></div></div></section>
+      <section class="feeds-page" data-user-id="bob"><div class="data-info"><div class="data-item"><span>关注</span><strong>998</strong></div></div></section>
+      <div class="wrapper"><div class="data-info"><div class="data-item"><span>关注</span><strong>997</strong></div></div></div>
+      <div class="data-info"><div class="data-item"><span>关注</span><strong>7</strong></div></div>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      profile: { following: { raw: '7', value: 7 } },
+    });
+  });
 });
