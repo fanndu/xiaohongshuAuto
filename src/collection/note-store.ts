@@ -66,8 +66,9 @@ export class NoteStore {
     return this.records.map(clone);
   }
 
+  /** Returns newly discovered components that still survive after this batch's merges. */
   addMany(items: readonly NoteInput[]): number {
-    const initialSize = this.records.length;
+    const newRecords = new Set<NoteRecord>();
     for (const item of items) {
       const candidate = this.candidate(item);
       if (!candidate) continue;
@@ -88,7 +89,12 @@ export class NoteStore {
         const earliest = this.records[earliestIndex];
         const later = this.records[laterIndex];
         if (!earliest || !later) continue;
-        this.records[earliestIndex] = this.merge(this.merge(earliest, later), candidate);
+        const merged = this.merge(this.merge(earliest, later), candidate);
+        const remainsNew = newRecords.has(earliest) && newRecords.has(later);
+        newRecords.delete(earliest);
+        newRecords.delete(later);
+        if (remainsNew) newRecords.add(merged);
+        this.records[earliestIndex] = merged;
         this.records.splice(laterIndex, 1);
         this.rebuildIndexes();
         continue;
@@ -99,16 +105,20 @@ export class NoteStore {
         this.records.push(candidate);
         const newIndex = this.records.length - 1;
         this.index(candidate, newIndex);
+        newRecords.add(candidate);
         continue;
       }
 
       const existing = this.records[index];
       if (!existing) continue;
       const merged = this.merge(existing, candidate);
+      const remainsNew = newRecords.has(existing);
+      newRecords.delete(existing);
+      if (remainsNew) newRecords.add(merged);
       this.records[index] = merged;
       this.index(merged, index);
     }
-    return Math.max(0, this.records.length - initialSize);
+    return newRecords.size;
   }
 
   private candidate(item: NoteInput): NoteRecord | null {

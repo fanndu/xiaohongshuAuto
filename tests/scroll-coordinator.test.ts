@@ -281,6 +281,29 @@ describe('collectUntilStable', () => {
     expect(env.scrolls).toBe(0);
   });
 
+  it('does not count old-record coalescence as a zero-add round when a new note also arrives', async () => {
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/scroll-bridge';
+    const rounds: NoteRecord[][] = [[
+      note('C'),
+      { ...note('A'), noteUrl: fallbackUrl },
+    ], []];
+    const progress: number[] = [];
+    let reads = 0;
+
+    const result = await collectUntilStable({
+      environment: environment(),
+      intervalMs: 0,
+      stableRounds: 1,
+      seed: [note('A'), { ...note(''), noteUrl: fallbackUrl }],
+      readNotes: () => { reads += 1; return rounds.shift() ?? []; },
+      onProgress: count => { progress.push(count); },
+    });
+
+    expect(reads).toBe(2);
+    expect(progress).toEqual([2, 2]);
+    expect(result.notes.map(item => item.id)).toEqual(['A', 'C']);
+  });
+
   it.each([
     [{ stableRounds: 0 }],
     [{ stableRounds: 1.5 }],

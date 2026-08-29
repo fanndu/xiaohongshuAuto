@@ -121,6 +121,42 @@ describe('NoteStore', () => {
     ]);
   });
 
+  it('counts surviving new components even when existing records coalesce', () => {
+    const store = new NoteStore();
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/existing-bridge';
+    store.addMany([note({ id: 'A' })]);
+    store.addMany([note({ noteUrl: fallbackUrl })]);
+
+    expect(store.addMany([
+      note({ id: 'C', title: 'new component' }),
+      note({ id: 'A', noteUrl: fallbackUrl }),
+    ])).toBe(1);
+    expect(store.values().map(item => item.id)).toEqual(['A', 'C']);
+  });
+
+  it('counts a same-batch alias bridge as one new component', () => {
+    const store = new NoteStore();
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/new-bridge';
+
+    expect(store.addMany([
+      note({ id: 'A' }),
+      note({ noteUrl: fallbackUrl }),
+      note({ id: 'A', noteUrl: fallbackUrl }),
+    ])).toBe(1);
+  });
+
+  it('does not count a new alias that becomes part of an existing record', () => {
+    const store = new NoteStore();
+    const fallbackUrl = 'https://www.xiaohongshu.com/user/profile/existing-alias';
+    store.addMany([note({ id: 'A' })]);
+
+    expect(store.addMany([
+      note({ noteUrl: fallbackUrl }),
+      note({ id: 'A', noteUrl: fallbackUrl }),
+    ])).toBe(0);
+    expect(store.values()).toEqual([note({ id: 'A', noteUrl: fallbackUrl })]);
+  });
+
   it('deduplicates normalized query and hash URL variants when no note ID is available', () => {
     const store = new NoteStore();
 
