@@ -1,2 +1,6 @@
 .superpowers/
 .worktrees/
+node_modules/
+.wxt/
+.output/
+coverage/
