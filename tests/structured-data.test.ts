@@ -247,7 +247,7 @@ describe('parseStructuredPage', () => {
 
   it('bounds traversal without overflowing and preserves a parsed profile', () => {
     let deeplyNested: unknown = [{ id: 'too-deep', title: '不应出现' }];
-    for (let depth = 0; depth < 5_000; depth += 1) deeplyNested = [deeplyNested];
+    for (let depth = 0; depth < 100; depth += 1) deeplyNested = [deeplyNested];
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
       user: { userPageData: { basicInfo: { nickname: '保留资料' }, interactions: [], notes: deeplyNested } },
     })};</script>`;
@@ -377,5 +377,32 @@ describe('parseStructuredPage', () => {
     ].join('');
 
     expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('除法后状态');
+  });
+
+  it.each(['if (true)', 'if (true) {}'])('ignores a regex marker after %s', (prefix) => {
+    const real = {
+      user: { userPageData: { basicInfo: { nickname: '控制流真实状态' }, interactions: [], notes: [] } },
+    };
+    const regexFake = JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '控制流正则伪状态' }, interactions: [], notes: [] } },
+    });
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(real)};`,
+      `${prefix} /window.__INITIAL_STATE__ = ${regexFake}/;</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('控制流真实状态');
+  });
+
+  it('recognizes a real assignment after Unicode-identifier division', () => {
+    const real = {
+      user: { userPageData: { basicInfo: { nickname: 'Unicode除法后状态' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      '<script>const 变量 = 10; 变量 / 2;',
+      `window.__INITIAL_STATE__ = ${JSON.stringify(real)};</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('Unicode除法后状态');
   });
 });

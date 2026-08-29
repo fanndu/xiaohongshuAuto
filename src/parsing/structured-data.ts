@@ -1,16 +1,15 @@
+import { parse } from 'acorn-loose';
+import type { Node } from 'acorn';
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
 import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 
 type JsonRecord = Record<string, unknown>;
-type LexicalMode = 'code' | 'single-quote' | 'double-quote' | 'template' | 'regex' | 'line-comment' | 'block-comment';
 
 const MAX_SCRIPT_CHARS = 5_000_000;
+const MAX_AST_NODE_VISITS = 100_000;
 const MAX_NOTE_DEPTH = 64;
 const MAX_NOTE_VISITS = 10_000;
 const MAX_NOTE_RECORDS = 10_000;
-const REGEX_PREFIX_KEYWORDS = new Set([
-  'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'return', 'throw', 'typeof', 'void', 'yield',
-]);
 
 export interface StructuredPageResult {
   profile: Partial<ProfileRecord> | null;
@@ -22,9 +21,6 @@ const record = (value: unknown): JsonRecord | null =>
 
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
 
-const identifierStart = (value: string): boolean => /[A-Za-z_$]/.test(value);
-const identifierPart = (value: string): boolean => /[A-Za-z0-9_$]/.test(value);
-
 function hasUserPageData(value: unknown): boolean {
   return record(record(record(value)?.user)?.userPageData) !== null;
 }
@@ -35,37 +31,6 @@ function firstString(...values: unknown[]): string {
     if (result) return result;
   }
   return '';
-}
-
-function assignedJson(text: string, start: number): string | null {
-  let index = start;
-  while (/\s/.test(text[index] ?? '')) index += 1;
-  const opening = text[index];
-  if (opening !== '{' && opening !== '[') return null;
-
-  const stack: string[] = [];
-  let quote = '';
-  let escaped = false;
-  for (; index < text.length; index += 1) {
-    const char = text[index] ?? '';
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === quote) quote = '';
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (char === '{') stack.push('}');
-    else if (char === '[') stack.push(']');
-    else if (char === '}' || char === ']') {
-      if (stack.pop() !== char) return null;
-      if (stack.length === 0) return text.slice(start, index + 1).trim();
-    }
-  }
-  return null;
 }
 
 function replaceUndefinedPropertyValues(source: string): string {
@@ -104,127 +69,82 @@ function replaceUndefinedPropertyValues(source: string): string {
   return output;
 }
 
+function isNode(value: unknown): value is Node {
+  const candidate = record(value);
+  return candidate !== null && typeof candidate.type === 'string'
+    && typeof candidate.start === 'number' && typeof candidate.end === 'number';
+}
+
+function childNodes(node: Node): Node[] {
+  const children: Node[] = [];
+  for (const value of Object.values(node)) {
+    if (isNode(value)) children.push(value);
+    else if (Array.isArray(value)) {
+      for (const item of value) if (isNode(item)) children.push(item);
+    }
+  }
+  return children;
+}
+
+function initialStateRightHand(node: Node): Node | null {
+  const assignment = node as Node & { operator?: unknown; left?: unknown; right?: unknown };
+  if (assignment.type !== 'AssignmentExpression' || assignment.operator !== '=' || !isNode(assignment.left)
+    || !isNode(assignment.right) || assignment.left.type !== 'MemberExpression') return null;
+
+  const left = assignment.left as Node & { computed?: unknown; object?: unknown; property?: unknown };
+  if (left.computed === true || !isNode(left.object) || !isNode(left.property)) return null;
+  const object = left.object as Node & { name?: unknown };
+  const property = left.property as Node & { name?: unknown };
+  return object.type === 'Identifier' && object.name === 'window'
+    && property.type === 'Identifier' && property.name === '__INITIAL_STATE__'
+    ? assignment.right
+    : null;
+}
+
+function lastStateFromScript(source: string): unknown {
+  let program: Node;
+  try {
+    program = parse(source, { ecmaVersion: 'latest' });
+  } catch {
+    return null;
+  }
+
+  let latest: { start: number; state: unknown } | null = null;
+  const pending: Node[] = [program];
+  let visits = 0;
+  while (pending.length > 0 && visits < MAX_AST_NODE_VISITS) {
+    const node = pending.pop();
+    if (!node) continue;
+    visits += 1;
+
+    const rightHand = initialStateRightHand(node);
+    if (rightHand) {
+      try {
+        const state = JSON.parse(replaceUndefinedPropertyValues(source.slice(rightHand.start, rightHand.end))) as unknown;
+        if (hasUserPageData(state) && (latest === null || node.start >= latest.start)) {
+          latest = { start: node.start, state };
+        }
+      } catch {
+        // Invalid JSON is not state; retain an earlier shape-valid assignment if present.
+      }
+    }
+
+    const children = childNodes(node);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      const child = children[index];
+      if (child) pending.push(child);
+    }
+  }
+  return latest?.state ?? null;
+}
+
 function readInitialState(doc: Document): unknown {
-  const marker = 'window.__INITIAL_STATE__';
   let latestState: unknown = null;
   for (const script of doc.querySelectorAll('script')) {
-    const text = script.textContent ?? '';
-    if (text.length > MAX_SCRIPT_CHARS) continue;
-
-    let mode: LexicalMode = 'code';
-    let escaped = false;
-    let regexCharacterClass = false;
-    let canStartRegex = true;
-    for (let index = 0; index < text.length; index += 1) {
-      const char = text[index] ?? '';
-      const next = text[index + 1] ?? '';
-      if (mode === 'line-comment') {
-        if (char === '\n' || char === '\r') mode = 'code';
-        continue;
-      }
-      if (mode === 'block-comment') {
-        if (char === '*' && next === '/') {
-          mode = 'code';
-          index += 1;
-        }
-        continue;
-      }
-      if (mode === 'regex') {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if (regexCharacterClass && char === ']') regexCharacterClass = false;
-        else if (!regexCharacterClass && char === '[') regexCharacterClass = true;
-        else if (!regexCharacterClass && char === '/') {
-          while (/[A-Za-z]/.test(text[index + 1] ?? '')) index += 1;
-          mode = 'code';
-          canStartRegex = false;
-        }
-        continue;
-      }
-      if (mode !== 'code') {
-        if (escaped) escaped = false;
-        else if (char === '\\') escaped = true;
-        else if ((mode === 'single-quote' && char === "'")
-          || (mode === 'double-quote' && char === '"')
-          || (mode === 'template' && char === '`')) {
-          mode = 'code';
-          canStartRegex = false;
-        }
-        continue;
-      }
-      if (char === "'") {
-        mode = 'single-quote';
-        continue;
-      }
-      if (char === '"') {
-        mode = 'double-quote';
-        continue;
-      }
-      if (char === '`') {
-        mode = 'template';
-        continue;
-      }
-      if (char === '/' && next === '/') {
-        mode = 'line-comment';
-        index += 1;
-        continue;
-      }
-      if (char === '/' && next === '*') {
-        mode = 'block-comment';
-        index += 1;
-        continue;
-      }
-      if (char === '/' && canStartRegex) {
-        mode = 'regex';
-        escaped = false;
-        regexCharacterClass = false;
-        continue;
-      }
-      if (char === '/') {
-        canStartRegex = true;
-        continue;
-      }
-      if (text.startsWith(marker, index)) {
-        let equalsIndex = index + marker.length;
-        while (/\s/.test(text[equalsIndex] ?? '')) equalsIndex += 1;
-        if (text[equalsIndex] === '=') {
-          const source = assignedJson(text, equalsIndex + 1);
-          if (source) {
-            try {
-              const candidate = JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
-              if (hasUserPageData(candidate)) latestState = candidate;
-            } catch {
-              // A later assignment can still be valid, so keep scanning this and later scripts.
-            }
-          }
-        }
-        continue;
-      }
-      if (identifierStart(char)) {
-        let end = index + 1;
-        while (identifierPart(text[end] ?? '')) end += 1;
-        canStartRegex = REGEX_PREFIX_KEYWORDS.has(text.slice(index, end));
-        index = end - 1;
-        continue;
-      }
-      if (/\d/.test(char)) {
-        let end = index + 1;
-        while (/[A-Za-z0-9_.]/.test(text[end] ?? '')) end += 1;
-        canStartRegex = false;
-        index = end - 1;
-        continue;
-      }
-      if (char === ')' || char === ']' || char === '}' || char === '.') {
-        canStartRegex = false;
-        continue;
-      }
-      if ((char === '+' || char === '-') && char === next) {
-        canStartRegex = false;
-        index += 1;
-        continue;
-      }
-      if ('([{,;:?=!*%&|^<>~+-'.includes(char)) canStartRegex = true;
-    }
+    const source = script.textContent ?? '';
+    if (source.length > MAX_SCRIPT_CHARS) continue;
+    const state = lastStateFromScript(source);
+    if (state !== null) latestState = state;
   }
   return latestState;
 }

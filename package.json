@@ -17,6 +17,7 @@
     "postinstall": "wxt prepare"
   },
   "dependencies": {
+    "acorn-loose": "^8.5.2",
     "exceljs": "^4.4.0"
   },
   "devDependencies": {
