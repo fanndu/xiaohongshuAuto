@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseStructuredPage } from '../src/parsing/structured-data';
+import { parseStructuredPage, structuredStateTestHooks, STRUCTURED_STATE_LIMITS } from '../src/parsing/structured-data';
 
 describe('parseStructuredPage', () => {
   it('extracts profile and note fields from initial state', () => {
@@ -7,6 +7,7 @@ describe('parseStructuredPage', () => {
       user: {
         userPageData: {
           basicInfo: {
+            userId: 'u1',
             nickname: '旅行摄影阿哲',
             redId: 'xhs_azhe',
             desc: '记录山川',
@@ -43,6 +44,7 @@ describe('parseStructuredPage', () => {
       likedAndCollected: { raw: '8.6万', value: 86000 },
       exportNotes: [],
     });
+    expect(result.userId).toBe('u1');
     expect(result.notes).toEqual([{
       id: 'abc123',
       title: '雪山日出',
@@ -147,15 +149,16 @@ describe('parseStructuredPage', () => {
 
   it('returns the empty result for missing, malformed, or wrong-shaped state', () => {
     document.body.innerHTML = '<script>window.__INITIAL_STATE__ = {broken;</script>';
-    expect(parseStructuredPage(document, location.href)).toEqual({ profile: null, notes: [] });
+    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', profile: null, notes: [] });
 
     document.body.innerHTML = '<script>window.otherState = {}</script>';
-    expect(parseStructuredPage(document, location.href)).toEqual({ profile: null, notes: [] });
+    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', profile: null, notes: [] });
 
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
       user: { userPageData: { basicInfo: [], interactions: {}, notes: {} } },
     })};</script>`;
     expect(parseStructuredPage(document, location.href)).toEqual({
+      userId: '',
       profile: {
         profileUrl: location.href,
         accountName: '',
@@ -416,6 +419,52 @@ describe('parseStructuredPage', () => {
     </script>`;
 
     expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('末尾状态');
+  });
+
+  it('extracts only explicit stable user identity fields, never redId or display name', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userId: 'from-user', userPageData: { userId: 'from-page', basicInfo: {
+        userId: 'from-basic', redId: 'not-a-route-id', nickname: '也不是路由 ID',
+      }, interactions: [], notes: [] } },
+    })};</script>`;
+
+    expect(parseStructuredPage(document, location.href).userId).toBe('from-basic');
+  });
+
+  it('skips unrelated scripts before Acorn and caches unchanged candidate script text', () => {
+    structuredStateTestHooks.reset();
+    const state = { user: { userPageData: { userId: 'u1', basicInfo: {}, interactions: [], notes: [] } } };
+    document.body.innerHTML = `<script>${'x'.repeat(200_000)}</script><script>window.__INITIAL_STATE__ = ${JSON.stringify(state)};</script>`;
+
+    expect(parseStructuredPage(document, location.href).userId).toBe('u1');
+    expect(structuredStateTestHooks.parseCalls()).toBe(1);
+    expect(parseStructuredPage(document, location.href).userId).toBe('u1');
+    expect(structuredStateTestHooks.parseCalls()).toBe(1);
+
+    const script = document.querySelectorAll('script')[1]!;
+    script.textContent = `window.__INITIAL_STATE__ = ${JSON.stringify({ ...state, user: { ...state.user, userPageData: { ...state.user.userPageData, userId: 'u2' } } })};`;
+    expect(parseStructuredPage(document, location.href).userId).toBe('u2');
+    expect(structuredStateTestHooks.parseCalls()).toBe(2);
+  });
+
+  it('limits candidate-script count and aggregate parse bytes without letting skipped candidates mask earlier valid state', () => {
+    structuredStateTestHooks.reset();
+    const state = (userId: string) => ({ user: { userPageData: { userId, basicInfo: {}, interactions: [], notes: [] } } });
+    const accepted = Array.from({ length: STRUCTURED_STATE_LIMITS.maxCandidateScripts }, (_, index) =>
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state(`accepted-${index}`))};</script>`).join('');
+    document.body.innerHTML = `${accepted}<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('beyond-count'))};</script>`;
+    expect(parseStructuredPage(document, location.href).userId).toBe(`accepted-${STRUCTURED_STATE_LIMITS.maxCandidateScripts - 1}`);
+
+    const oversized = ' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1);
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('oversized'))};${oversized}</script><script>window.__INITIAL_STATE__ = ${JSON.stringify(state('after-oversized'))};</script>`;
+    expect(parseStructuredPage(document, location.href).userId).toBe('after-oversized');
+
+    const padding = ' '.repeat(Math.ceil(STRUCTURED_STATE_LIMITS.maxCandidateScriptChars / 2));
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('within-budget'))};${padding}</script>`,
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('beyond-byte-budget'))};${padding}</script>`,
+    ].join('');
+    expect(parseStructuredPage(document, location.href).userId).toBe('within-budget');
   });
 
   it('falls back when a later wrong-shaped assignment has a huge RHS', () => {

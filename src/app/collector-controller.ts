@@ -5,7 +5,12 @@ import type { FloatingControl, UiState } from '../ui/floating-control';
 export interface ControllerDependencies {
   ui: Pick<FloatingControl, 'render'>;
   readProfile(): ProfileRecord;
-  collect(signal: AbortSignal, onProgress: (count: number) => void | Promise<void>): Promise<{
+  /** Retained notes are a cloned snapshot and may be safely mutated by the collector dependency. */
+  collect(
+    signal: AbortSignal,
+    onProgress: (count: number) => void | Promise<void>,
+    retainedNotes: readonly NoteRecord[],
+  ): Promise<{
     reason: 'complete' | 'stopped'; notes: NoteRecord[];
   }>;
   exportResult(result: CollectionResult): Promise<void>;
@@ -153,7 +158,7 @@ export class CollectorController {
       try {
         result = await this.dependencies.collect(run.controller.signal, count => {
           if (this.isCurrent(run)) this.render({ phase: 'collecting', count });
-        });
+        }, cloneNotes(this.notes));
       } catch (error) {
         this.handleCollectionError(run, error);
         return;

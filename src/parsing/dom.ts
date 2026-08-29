@@ -150,17 +150,27 @@ function mapNote(card: Element, base: string): NoteRecord | null {
   const link = links[0];
   if (!link) return null;
 
-  const videoMarker = card.querySelector([
+  const videoMarker = card.matches('[data-note-type="video"], [data-testid="video"], [aria-label*="视频"]')
+    || card.querySelector([
     'video',
     '[data-testid="video"]',
-    '[class*="video"]',
+    '[data-note-type="video"]',
+    '[class~="video-icon"]',
     '[aria-label*="视频"]',
   ].join(','));
+  const imageMarker = card.matches('[data-note-type="image"], [data-testid="image"], [aria-label*="图文"]')
+    || card.querySelector([
+      '[data-testid="image"]',
+      '[data-note-type="image"]',
+      '[class~="image-icon"]',
+      '[aria-label*="图文"]',
+    ].join(','));
   return {
     id: link.id,
     title: firstText(card, ['[data-testid="note-title"]', '.title', '[class*="title"]', 'h2', 'h3']),
     noteUrl: link.noteUrl,
-    type: videoMarker ? 'video' : 'image',
+    // Covers are common to video and image posts, so an <img> is not type evidence.
+    type: videoMarker ? 'video' : imageMarker ? 'image' : 'unknown',
     likes: parseCount(likesRaw(card)),
     coverUrl: imageUrl(card, ['a.cover img', 'img'], base),
     exportNotes: [],
@@ -207,12 +217,24 @@ function uniqueNotes(cards: Element[], base: string): NoteRecord[] {
   return notes;
 }
 
-function profileRoot(doc: Document): ParentNode {
+function profileRootElement(doc: Document): Element | null {
   for (const selector of ['[data-testid="profile-header"]', 'section.user', '.user-info']) {
     const root = doc.querySelector(selector);
     if (root) return root;
   }
-  return doc;
+  return null;
+}
+
+function profileRoot(doc: Document): ParentNode {
+  return profileRootElement(doc) ?? doc;
+}
+
+/** A DOM fallback is safe only when it looks like a real profile, not a generic page fragment. */
+export function isRecognizedDomProfile(doc: Document): boolean {
+  const root = profileRootElement(doc);
+  if (!root) return false;
+  const profile = parseDomPage(doc, location.href);
+  return Boolean(profile.profile.accountName || profile.profile.redId || profile.profile.avatarUrl);
 }
 
 export function parseDomPage(

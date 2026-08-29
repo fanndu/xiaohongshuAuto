@@ -30,7 +30,7 @@ const note = (id: string): NoteRecord => ({
 function dependencies(overrides: Partial<ControllerDependencies> = {}) {
   const ui = { render: vi.fn() };
   const readProfile = vi.fn(profile);
-  const collect = vi.fn(async (_signal: AbortSignal, onProgress: (count: number) => void | Promise<void>) => {
+  const collect = vi.fn(async (_signal: AbortSignal, onProgress: (count: number) => void | Promise<void>, _retainedNotes: readonly NoteRecord[]) => {
     await onProgress(1);
     return { reason: 'complete' as const, notes: [note('one')] };
   });
@@ -406,5 +406,26 @@ describe('CollectorController', () => {
       phase: 'paused', count: 1, message: '已停止，可导出当前结果',
     });
     expect(deps.exportResult).toHaveBeenLastCalledWith({ profile: profile(), notes: [note('attached')] });
+  });
+
+  it('passes an immutable snapshot of retained partial notes into a retry and exports retained plus new notes', async () => {
+    const old = note('old');
+    let received: readonly NoteRecord[] = [];
+    const deps = dependencies({
+      collect: vi.fn()
+        .mockResolvedValueOnce({ reason: 'stopped', notes: [old] })
+        .mockImplementationOnce(async (_signal, _progress, retained: readonly NoteRecord[]) => {
+          received = structuredClone(retained);
+          (retained[0] as NoteRecord).title = 'dependency mutation';
+          return { reason: 'complete' as const, notes: [note('old'), note('new')] };
+        }),
+    });
+    const controller = new CollectorController(deps);
+
+    await controller.start();
+    await controller.retry();
+
+    expect(received).toEqual([note('old')]);
+    expect(deps.exportResult).toHaveBeenLastCalledWith({ profile: profile(), notes: [note('old'), note('new')] });
   });
 });

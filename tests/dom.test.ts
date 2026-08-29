@@ -155,7 +155,7 @@ describe('parseDomPage', () => {
       id: 'relative-id',
       title: '相对链接',
       noteUrl: 'https://www.xiaohongshu.com/discovery/item/relative-id',
-      type: 'image',
+      type: 'unknown',
       likes: { raw: '', value: null },
       coverUrl: '',
       exportNotes: [],
@@ -240,7 +240,7 @@ describe('parseDomPage', () => {
     `;
 
     expect(parseDomPage(document, profileUrl).notes).toMatchObject([
-      { id: 'first-id', title: '第一篇', type: 'image' },
+      { id: 'first-id', title: '第一篇', type: 'unknown' },
       { id: 'second-id', title: '第二篇', type: 'video' },
     ]);
     expect(parseDomPage(document, profileUrl).notes).toHaveLength(2);
@@ -340,5 +340,19 @@ describe('parseDomPage', () => {
       },
       notes: [],
     });
+  });
+
+  it('leaves unmarked card types unknown and accepts only explicit media markers', () => {
+    document.body.innerHTML = `
+      <article class="note-item"><a href="/explore/unknown"><img src="https://img.example/cover.jpg"></a></article>
+      <article class="note-item"><a href="/explore/video"></a><span class="video-icon"></span></article>
+      <article class="note-item" data-note-type="image"><a href="/explore/image"></a></article>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes.map(note => ({ id: note.id, type: note.type }))).toEqual([
+      { id: 'unknown', type: 'unknown' },
+      { id: 'video', type: 'video' },
+      { id: 'image', type: 'image' },
+    ]);
   });
 });

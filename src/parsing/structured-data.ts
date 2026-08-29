@@ -6,14 +6,45 @@ import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 type JsonRecord = Record<string, unknown>;
 
 const MAX_SCRIPT_CHARS = 5_000_000;
+const MAX_CANDIDATE_SCRIPTS = 32;
+const MAX_CANDIDATE_SCRIPT_CHARS = 8_000_000;
+const INITIAL_STATE_MARKER = 'window.__INITIAL_STATE__';
 const MAX_NOTE_DEPTH = 64;
 const MAX_NOTE_VISITS = 10_000;
 const MAX_NOTE_RECORDS = 10_000;
 
 export interface StructuredPageResult {
+  /** Explicit, stable page identity. Never inferred from a red ID or display name. */
+  userId: string;
   profile: Partial<ProfileRecord> | null;
   notes: NoteRecord[];
 }
+
+/** Bounded input limits for untrusted embedded application state. */
+export const STRUCTURED_STATE_LIMITS = {
+  maxScriptChars: MAX_SCRIPT_CHARS,
+  maxCandidateScripts: MAX_CANDIDATE_SCRIPTS,
+  maxCandidateScriptChars: MAX_CANDIDATE_SCRIPT_CHARS,
+} as const;
+
+interface CachedScriptParse {
+  source: string;
+  state: unknown;
+}
+
+let parsedScriptCount = 0;
+let scriptParseCache = new WeakMap<HTMLScriptElement, CachedScriptParse>();
+
+/** Test-only observability; production parsing behavior is unchanged by this seam. */
+export const structuredStateTestHooks = {
+  reset(): void {
+    parsedScriptCount = 0;
+    scriptParseCache = new WeakMap<HTMLScriptElement, CachedScriptParse>();
+  },
+  parseCalls(): number {
+    return parsedScriptCount;
+  },
+};
 
 const record = (value: unknown): JsonRecord | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
@@ -101,6 +132,7 @@ function initialStateRightHand(node: Node): Node | null {
 }
 
 function lastStateFromScript(source: string): unknown {
+  parsedScriptCount += 1;
   let program: Node;
   try {
     program = parse(source, { ecmaVersion: 'latest' });
@@ -136,10 +168,22 @@ function lastStateFromScript(source: string): unknown {
 
 function readInitialState(doc: Document): unknown {
   let latestState: unknown = null;
+  let candidateCount = 0;
+  let candidateChars = 0;
   for (const script of doc.querySelectorAll('script')) {
     const source = script.textContent ?? '';
+    // Most page scripts are irrelevant. Avoid constructing an AST unless this exact marker occurs.
+    if (!source.includes(INITIAL_STATE_MARKER)) continue;
+    if (candidateCount >= MAX_CANDIDATE_SCRIPTS) break;
+    candidateCount += 1;
     if (source.length > MAX_SCRIPT_CHARS) continue;
-    const state = lastStateFromScript(source);
+    if (candidateChars + source.length > MAX_CANDIDATE_SCRIPT_CHARS) continue;
+    candidateChars += source.length;
+    const cached = scriptParseCache.get(script);
+    const state = cached?.source === source
+      ? cached.state
+      : lastStateFromScript(source);
+    if (!cached || cached.source !== source) scriptParseCache.set(script, { source, state });
     if (state !== null) latestState = state;
   }
   return latestState;
@@ -218,7 +262,7 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
   const state = readInitialState(doc);
   const page = record(record(state)?.user);
   const userPageData = record(page?.userPageData);
-  if (!userPageData) return { profile: null, notes: [] };
+  if (!userPageData) return { userId: '', profile: null, notes: [] };
 
   const basic = record(userPageData.basicInfo) ?? {};
   const interactions = Array.isArray(userPageData.interactions)
@@ -227,6 +271,7 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
   const countFor = (type: string) => parseCount(string(interactions.find(item => item.type === type)?.count));
 
   return {
+    userId: firstString(basic.userId, userPageData.userId, page?.userId),
     profile: {
       profileUrl,
       accountName: string(basic.nickname),

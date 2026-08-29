@@ -3,13 +3,21 @@ import { formatLocalDateTime } from '../domain/normalize';
 import { canonicalProfileRoute } from '../domain/routes';
 import type { CollectionResult } from '../domain/types';
 import type { ScrollEnvironment } from '../collection/scroll-coordinator';
-import { parseDomPage } from '../parsing/dom';
+import { isRecognizedDomProfile, parseDomPage } from '../parsing/dom';
 import { mergeProfile } from '../parsing/merge';
 import { parseStructuredPage } from '../parsing/structured-data';
 import { FloatingControl, type UiActions } from '../ui/floating-control';
 import { CollectorController } from './collector-controller';
 
 export type Unmount = () => void;
+
+/** The route has committed before its profile document/state has reconciled. */
+export class ProfileDocumentNotReadyError extends Error {
+  constructor() {
+    super('Profile document is not ready for the current route');
+    this.name = 'ProfileDocumentNotReadyError';
+  }
+}
 
 type MountedControl = Pick<FloatingControl, 'destroy' | 'render'>;
 
@@ -33,17 +41,26 @@ export function mountCollector(
   let controller!: CollectorController;
   let ui: MountedControl | undefined;
   try {
+    const readPages = () => {
+      const structured = parseStructuredPage(document, profileUrl);
+      const dom = parseDomPage(document, profileUrl);
+      if (structured.userId) {
+        // A conflicting explicit state proves this DOM belongs to a stale SPA route.
+        if (structured.userId !== route.key) throw new ProfileDocumentNotReadyError();
+        return { structured, dom };
+      }
+      // Without an explicit structured identity, do not use any state-derived profile or notes.
+      if (!isRecognizedDomProfile(document)) throw new ProfileDocumentNotReadyError();
+      return { structured: { userId: '', profile: null, notes: [] }, dom };
+    };
+    // Validate before creating controls so lifecycle polling can retry a loading/error document cleanly.
+    readPages();
     ui = (options.createControl ?? (actions => new FloatingControl(actions)))({
       start: () => controller.start(),
       stop: () => controller.stop(),
       retry: () => controller.retry(),
       exportPartial: () => controller.exportPartial(),
     });
-    const readPages = () => ({
-      structured: parseStructuredPage(document, profileUrl),
-      dom: parseDomPage(document, profileUrl),
-    });
-
     controller = new CollectorController({
       ui,
       readProfile: () => {
@@ -55,10 +72,10 @@ export function mountCollector(
           formatLocalDateTime(options.now ? options.now() : new Date()),
         );
       },
-      collect: (signal, onProgress) => {
+      collect: (signal, onProgress, retainedNotes) => {
         const first = readPages();
         return collectUntilStable({
-          seed: [...first.structured.notes, ...first.dom.notes],
+          seed: [...retainedNotes, ...first.structured.notes, ...first.dom.notes],
           readNotes: () => {
             const page = readPages();
             return [...page.structured.notes, ...page.dom.notes];

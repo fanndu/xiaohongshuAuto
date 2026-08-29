@@ -135,4 +135,41 @@ describe('collector module integration', () => {
     cleanup();
     expect(control.destroyed).toBe(true);
   });
+
+  it('seeds a retry with stopped notes and enriches them with newly virtualized DOM notes', async () => {
+    document.body.innerHTML = fixture;
+    let phase = 0;
+    const environment: ScrollEnvironment = {
+      atBottom: () => phase === 1,
+      hasAccessBlock: () => false,
+      scrollToBottom: () => undefined,
+      wait: () => phase === 0 ? new Promise<void>(() => {}) : Promise.resolve(),
+    };
+    const exported: CollectionResult[] = [];
+    let control: FakeControl | undefined;
+    const cleanup = mountCollector(profileUrl, undefined, {
+      environment,
+      createControl: actions => {
+        control = { actions, destroyed: false, states: [], render(state) { this.states.push({ ...state }); }, destroy() { this.destroyed = true; } };
+        return control;
+      },
+      exportResult: async result => { exported.push(result); },
+    });
+    if (!control) throw new Error('Expected injected control');
+
+    const stopped = control.actions.start();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    control.actions.stop();
+    await stopped;
+    document.querySelector('.feeds-page')?.insertAdjacentHTML('beforeend', '<article class="note-item" data-note-type="image"><a href="/explore/new-virtualized"><span class="title">新作品</span></a></article>');
+    phase = 1;
+    await control.actions.retry();
+
+    expect(exported).toHaveLength(1);
+    expect(exported[0]?.notes.map(note => ({ id: note.id, title: note.title, type: note.type }))).toEqual([
+      { id: 'abc123', title: '雪山日出', type: 'video' },
+      { id: 'new-virtualized', title: '新作品', type: 'image' },
+    ]);
+    cleanup();
+  });
 });
