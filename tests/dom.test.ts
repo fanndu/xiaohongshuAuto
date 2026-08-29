@@ -62,6 +62,32 @@ describe('parseDomPage', () => {
     });
   });
 
+  it('supports generated avatar and description class variants', () => {
+    document.body.innerHTML = `
+      <div class="generated-avatar-shell"><img src="https://img.example/generated-avatar.jpg"></div>
+      <p class="generated-user-desc-value">生成的简介</p>
+    `;
+
+    expect(parseDomPage(document, profileUrl).profile).toMatchObject({
+      avatarUrl: 'https://img.example/generated-avatar.jpg',
+      description: '生成的简介',
+    });
+  });
+
+  it('uses a numeric stat span without mistaking its semantic label for the count', () => {
+    document.body.innerHTML = `
+      <div data-testid="profile-stat"><span>关注</span><span>7</span></div>
+      <div data-testid="profile-stat"><span>粉丝</span><span>1.5万</span></div>
+      <div data-testid="profile-stat"><span>获赞与收藏</span><span>12</span></div>
+    `;
+
+    expect(parseDomPage(document, profileUrl).profile).toMatchObject({
+      following: { raw: '7', value: 7 },
+      followers: { raw: '1.5万', value: 15000 },
+      likedAndCollected: { raw: '12', value: 12 },
+    });
+  });
+
   it('resolves relative discovery links and skips invalid or off-domain cards', () => {
     document.body.innerHTML = `
       <div class="note-item"><a href="/discovery/item/relative-id/?token=secret"><span class="title">相对链接</span></a></div>

@@ -36,6 +36,10 @@ function statRaw(doc: Document, label: string): string {
       'b',
     ]);
     if (count) return count;
+    for (const span of item.querySelectorAll('span')) {
+      const value = text(span);
+      if (value && parseCount(value).value !== null) return value;
+    }
   }
   return '';
 }
@@ -74,7 +78,7 @@ function mapNote(card: Element): NoteRecord | null {
     noteUrl,
     type: videoMarker ? 'video' : 'image',
     likes: parseCount(likes),
-    coverUrl: firstAttribute(card, ['img'], 'src'),
+    coverUrl: firstAttribute(card, ['a.cover img', 'img'], 'src'),
     exportNotes: [],
   };
 }
@@ -101,6 +105,7 @@ export function parseDomPage(
   const avatarUrl = firstAttribute(doc, [
     'img.user-avatar',
     '.user-avatar img',
+    '[class*="avatar"] img',
     'img[data-testid="user-avatar"]',
     '[data-testid="user-avatar"] img',
     'img[data-testid="avatar"]',
@@ -114,7 +119,13 @@ export function parseDomPage(
       accountName: firstText(doc, ['.user-name', '[data-testid="user-name"]', '.nickname', '[data-testid="nickname"]']),
       redId: stripLabel(rawRedId, '小红书号'),
       avatarUrl,
-      description: firstText(doc, ['.user-desc', '[data-testid="user-desc"]', '.desc', '[data-testid="description"]']),
+      description: firstText(doc, [
+        '.user-desc',
+        '[class*="user-desc"]',
+        '[data-testid="user-desc"]',
+        '.desc',
+        '[data-testid="description"]',
+      ]),
       ipLocation: stripLabel(rawIpLocation, 'IP属地'),
       following: parseCount(statRaw(doc, '关注')),
       followers: parseCount(statRaw(doc, '粉丝')),
