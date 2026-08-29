@@ -46,14 +46,29 @@ describe('FloatingControl', () => {
     expect(style).toMatch(/\.panel\s*\{[^}]*padding:\s*12px;/);
   });
 
-  it('uses inline important host defenses against hostile page CSS', () => {
+  it('uses inline host defenses against adversarial page id styling', () => {
+    const hostileStyle = document.createElement('style');
+    hostileStyle.textContent = '#xhs-profile-collector { pointer-events: none !important; transform: scale(0) !important; filter: opacity(0) !important; width: 0 !important; height: 0 !important; overflow: hidden !important; }';
+    document.head.append(hostileStyle);
     const control = new FloatingControl(makeActions());
 
+    expect(control.host.style.getPropertyValue('all')).toBe('initial');
     expect(control.host.style.getPropertyValue('display')).toBe('block');
     expect(control.host.style.getPropertyPriority('display')).toBe('important');
     expect(control.host.style.getPropertyValue('visibility')).toBe('visible');
     expect(control.host.style.getPropertyValue('opacity')).toBe('1');
     expect(control.host.style.getPropertyPriority('opacity')).toBe('important');
+    expect(control.host.style.getPropertyValue('pointer-events')).toBe('auto');
+    expect(control.host.style.getPropertyValue('transform')).toBe('none');
+    expect(control.host.style.getPropertyValue('filter')).toBe('none');
+    expect(control.host.style.getPropertyValue('overflow')).toBe('visible');
+    expect(control.host.style.getPropertyValue('width')).toBe('auto');
+    expect(control.host.style.getPropertyPriority('width')).toBe('important');
+    expect(control.host.style.getPropertyValue('height')).toBe('auto');
+    expect(control.host.style.getPropertyPriority('height')).toBe('important');
+    expect(control.host.style.getPropertyValue('position')).toBe('static');
+    expect(getComputedStyle(control.host).display).toBe('block');
+    hostileStyle.remove();
   });
 
   it.each([
@@ -220,5 +235,26 @@ describe('FloatingControl', () => {
     control.destroy();
     await Promise.resolve();
     expect(control.host.isConnected).toBe(false);
+  });
+
+  it('ignores an older async rejection after a newer action has changed the UI', async () => {
+    let rejectExport: ((reason?: unknown) => void) | undefined;
+    let control: FloatingControl;
+    const actions: UiActions = {
+      ...makeActions(),
+      exportPartial: vi.fn(() => new Promise<void>((_resolve, reject) => { rejectExport = reject; })),
+      retry: vi.fn(() => control.render({ phase: 'collecting', count: 8 })),
+    };
+    control = new FloatingControl(actions);
+    control.render(states.failed);
+
+    action(control, 'exportPartial').click();
+    action(control, 'retry').click();
+    rejectExport?.(new Error('late export failure'));
+    await Promise.resolve();
+
+    expect(control.root.querySelector('.title')?.textContent).toBe('已发现 8 篇');
+    expect(action(control, 'stop')).toBeInstanceOf(HTMLButtonElement);
+    expect(control.root.querySelector('.detail')?.textContent).toBe('正在加载更多…');
   });
 });

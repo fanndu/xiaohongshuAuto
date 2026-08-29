@@ -64,6 +64,7 @@ export class FloatingControl {
   private readonly actionsContainer: HTMLDivElement;
   private readonly actionButtons = new WeakMap<HTMLButtonElement, ActionName>();
   private count = 0;
+  private actionGeneration = 0;
   private destroyed = false;
 
   constructor(actions: UiActions) {
@@ -73,9 +74,17 @@ export class FloatingControl {
     this.host = document.createElement('div');
     this.host.id = hostId;
     this.host.setAttribute(ownerAttribute, 'true');
+    this.host.style.setProperty('all', 'initial', 'important');
     this.host.style.setProperty('display', 'block', 'important');
     this.host.style.setProperty('visibility', 'visible', 'important');
     this.host.style.setProperty('opacity', '1', 'important');
+    this.host.style.setProperty('pointer-events', 'auto', 'important');
+    this.host.style.setProperty('transform', 'none', 'important');
+    this.host.style.setProperty('filter', 'none', 'important');
+    this.host.style.setProperty('overflow', 'visible', 'important');
+    this.host.style.setProperty('width', 'auto', 'important');
+    this.host.style.setProperty('height', 'auto', 'important');
+    this.host.style.setProperty('position', 'static', 'important');
     this.root = this.host.attachShadow({ mode: 'closed' });
 
     const style = document.createElement('style');
@@ -134,6 +143,7 @@ export class FloatingControl {
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.actionGeneration++;
     this.root.removeEventListener('click', this.handleClick);
     this.status.replaceChildren();
     this.actionsContainer.replaceChildren();
@@ -167,11 +177,12 @@ export class FloatingControl {
     const button = target.closest<HTMLButtonElement>('button[data-action]');
     const action = button && this.actionButtons.get(button);
     if (!button || !action || button.dataset.action !== action) return;
+    const generation = ++this.actionGeneration;
     try {
       const result = this.actions[action]();
-      void Promise.resolve(result).catch(() => this.handleActionFailure());
+      void Promise.resolve(result).catch(() => this.handleActionFailure(generation));
     } catch {
-      this.handleActionFailure();
+      this.handleActionFailure(generation);
     }
   };
 
@@ -183,7 +194,9 @@ export class FloatingControl {
     return this.actionsContainer.querySelector('button') ?? this.status;
   }
 
-  private handleActionFailure(): void {
-    if (!this.destroyed) this.render({ phase: 'failed', count: this.count, message: '操作失败，请重试' });
+  private handleActionFailure(generation: number): void {
+    if (!this.destroyed && generation === this.actionGeneration) {
+      this.render({ phase: 'failed', count: this.count, message: '操作失败，请重试' });
+    }
   }
 }
