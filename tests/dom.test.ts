@@ -74,6 +74,40 @@ describe('parseDomPage', () => {
     });
   });
 
+  it('uses fields inside the profile header instead of earlier note-author fields', () => {
+    document.body.innerHTML = `
+      <article class="note-item">
+        <img class="author-avatar" src="https://img.example/note-author.jpg">
+        <span class="user-name">笔记作者</span>
+        <p class="user-desc">笔记摘要</p>
+      </article>
+      <section data-testid="profile-header">
+        <img data-testid="avatar" src="https://img.example/profile.jpg">
+        <span data-testid="user-name">真实主页名</span>
+        <p data-testid="user-desc">真实主页简介</p>
+        <span data-testid="user-redId">小红书号：real_id</span>
+        <span data-testid="ip-location">IP属地：美国</span>
+      </section>
+    `;
+
+    expect(parseDomPage(document, profileUrl).profile).toMatchObject({
+      accountName: '真实主页名',
+      avatarUrl: 'https://img.example/profile.jpg',
+      description: '真实主页简介',
+      redId: 'real_id',
+      ipLocation: '美国',
+    });
+  });
+
+  it('uses profile-root selector priority instead of document order', () => {
+    document.body.innerHTML = `
+      <div class="user-info"><span class="user-name">较低优先级</span></div>
+      <section data-testid="profile-header"><span class="user-name">最高优先级</span></section>
+    `;
+
+    expect(parseDomPage(document, profileUrl).profile.accountName).toBe('最高优先级');
+  });
+
   it('uses a numeric stat span without mistaking its semantic label for the count', () => {
     document.body.innerHTML = `
       <div data-testid="profile-stat"><span>关注</span><span>7</span></div>
@@ -85,6 +119,27 @@ describe('parseDomPage', () => {
       following: { raw: '7', value: 7 },
       followers: { raw: '1.5万', value: 15000 },
       likedAndCollected: { raw: '12', value: 12 },
+    });
+  });
+
+  it('finds nested numeric count candidates after invalid stat and like wrappers', () => {
+    document.body.innerHTML = `
+      <div data-testid="profile-stat"><span>关注</span><strong>7人<span>7</span></strong></div>
+      <div data-testid="profile-stat"><span>粉丝</span><strong>8人<span>8</span></strong></div>
+      <div data-testid="profile-stat"><span>获赞与收藏</span><strong>9人<span>9</span></strong></div>
+      <article class="note-item">
+        <a href="/explore/count-id"></a>
+        <span class="like-wrapper">7人<span>7</span></span>
+      </article>
+    `;
+
+    expect(parseDomPage(document, profileUrl)).toMatchObject({
+      profile: {
+        following: { raw: '7', value: 7 },
+        followers: { raw: '8', value: 8 },
+        likedAndCollected: { raw: '9', value: 9 },
+      },
+      notes: [{ likes: { raw: '7', value: 7 } }],
     });
   });
 
@@ -105,6 +160,70 @@ describe('parseDomPage', () => {
       coverUrl: '',
       exportNotes: [],
     }]);
+  });
+
+  it('uses a later valid note anchor when the first matching anchor is unsafe', () => {
+    document.body.innerHTML = `
+      <article class="note-item">
+        <a href="https://example.com/explore/reject-me">站外</a>
+        <a href="/explore/valid-second?token=secret"><span class="title">有效作品</span></a>
+      </article>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([{
+      id: 'valid-second',
+      noteUrl: 'https://www.xiaohongshu.com/explore/valid-second',
+      title: '有效作品',
+    }]);
+  });
+
+  it('resolves safe avatar and cover image fallbacks from lazy and srcset attributes', () => {
+    document.body.innerHTML = `
+      <section class="user">
+        <img class="user-avatar" src="javascript:alert(1)" data-src="/images/avatar.jpg">
+      </section>
+      <article class="note-item">
+        <a href="/explore/image-id"></a>
+        <a class="cover"><img src="data:image/png;base64,nope" data-src="http://img.example/insecure.jpg" data-original="//img.example/data-original.jpg"></a>
+      </article>
+      <article class="note-item">
+        <a href="/explore/srcset-id"></a>
+        <a class="cover"><img src="javascript:alert(1)" data-src="http://img.example/insecure.jpg" data-original="data:image/png;base64,nope" srcset="//img.example/srcset.jpg 1x, /images/unused.jpg 2x"></a>
+      </article>
+    `;
+
+    expect(parseDomPage(document, profileUrl)).toMatchObject({
+      profile: { avatarUrl: 'https://www.xiaohongshu.com/images/avatar.jpg' },
+      notes: [
+        { id: 'image-id', coverUrl: 'https://img.example/data-original.jpg' },
+        { id: 'srcset-id', coverUrl: 'https://img.example/srcset.jpg' },
+      ],
+    });
+  });
+
+  it('skips blank image attributes before trying lazy fallbacks', () => {
+    document.body.innerHTML = `
+      <section class="user"><img class="user-avatar" src="   " data-src="/images/lazy-avatar.jpg"></section>
+    `;
+
+    expect(parseDomPage(document, profileUrl).profile.avatarUrl)
+      .toBe('https://www.xiaohongshu.com/images/lazy-avatar.jpg');
+  });
+
+  it('deduplicates a nested generated note card', () => {
+    document.body.innerHTML = `
+      <section class="feeds-page"><article class="note-item">
+        <div class="generated-note-item">
+          <a href="/explore/nested-id"><span class="title">嵌套作品</span></a>
+        </div>
+      </article></section>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([{
+      id: 'nested-id',
+      title: '嵌套作品',
+    }]);
+    expect(parseDomPage(document, profileUrl).notes).toHaveLength(1);
   });
 
   it('does not throw for an empty DOM', () => {

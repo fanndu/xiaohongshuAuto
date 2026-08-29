@@ -2,19 +2,11 @@ import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize
 import type { NoteRecord, ProfileRecord } from '../domain/types';
 
 const text = (element: Element | null): string => (element?.textContent ?? '').trim();
+const normalizedText = (element: Element): string => text(element).replace(/\s+/g, '');
 
-function firstText(doc: ParentNode, selectors: string[]): string {
+function firstText(root: ParentNode, selectors: string[]): string {
   for (const selector of selectors) {
-    const value = text(doc.querySelector(selector));
-    if (value) return value;
-  }
-  return '';
-}
-
-function firstAttribute(doc: ParentNode, selectors: string[], attribute: string): string {
-  for (const selector of selectors) {
-    const element = doc.querySelector(selector);
-    const value = element?.getAttribute(attribute)?.trim() ?? '';
+    const value = text(root.querySelector(selector));
     if (value) return value;
   }
   return '';
@@ -24,22 +16,77 @@ function stripLabel(value: string, label: string): string {
   return value.replace(new RegExp(`^\\s*${label}\\s*[：:]?\\s*`, 'i'), '').trim();
 }
 
+function safeImageUrl(value: string, base: string): string {
+  const candidate = value.trim();
+  if (!candidate) return '';
+  try {
+    const url = new URL(candidate, base);
+    return url.protocol === 'https:' ? url.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
+function srcsetCandidates(srcset: string): string[] {
+  return srcset.split(',').map(candidate => candidate.trim().split(/\s+/, 1)[0] ?? '');
+}
+
+function imageUrl(root: ParentNode, selectors: string[], base: string): string {
+  const seen = new Set<HTMLImageElement>();
+  for (const selector of selectors) {
+    for (const image of root.querySelectorAll<HTMLImageElement>(selector)) {
+      if (seen.has(image)) continue;
+      seen.add(image);
+      const candidates = [
+        image.currentSrc,
+        image.getAttribute('src') ?? '',
+        image.getAttribute('data-src') ?? '',
+        image.getAttribute('data-original') ?? '',
+        ...srcsetCandidates(image.getAttribute('srcset') ?? ''),
+      ];
+      for (const candidate of candidates) {
+        const url = candidate ? safeImageUrl(candidate, base) : '';
+        if (url) return url;
+      }
+    }
+  }
+  return '';
+}
+
+function usableCount(root: Element, selectors: string[], label?: Element): string {
+  const candidates = new Set<Element>([root]);
+  for (const selector of selectors) {
+    for (const candidate of root.querySelectorAll(selector)) candidates.add(candidate);
+  }
+  for (const candidate of candidates) {
+    const raw = text(candidate);
+    if (!raw || candidate === label || (label && normalizedText(candidate) === normalizedText(label))) continue;
+    const parsed = parseCount(raw);
+    if (parsed.value !== null || parsed.raw === '隐藏') return parsed.raw;
+  }
+  return '';
+}
+
+function labelElement(item: Element, label: string): Element | null {
+  for (const candidate of item.querySelectorAll('*')) {
+    if (normalizedText(candidate) === label) return candidate;
+  }
+  return null;
+}
+
 function statRaw(doc: Document, label: string): string {
   const items = doc.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]');
   for (const item of items) {
-    if (!text(item).includes(label)) continue;
-    const count = firstText(item, [
+    const semanticLabel = labelElement(item, label);
+    if (!semanticLabel) continue;
+    const count = usableCount(item, [
       '[data-testid="stat-count"]',
-      '.count',
-      '[class*="count"]',
       'strong',
+      '.count',
       'b',
-    ]);
+      'span',
+    ], semanticLabel);
     if (count) return count;
-    for (const span of item.querySelectorAll('span')) {
-      const value = text(span);
-      if (value && parseCount(value).value !== null) return value;
-    }
   }
   return '';
 }
@@ -49,23 +96,39 @@ function noteCards(doc: Document): Element[] {
   for (const selector of ['.note-item', '[class*="note-item"]', 'section.feeds-page article']) {
     for (const card of doc.querySelectorAll(selector)) cards.add(card);
   }
-  return [...cards];
+  return [...cards].filter(card => {
+    for (let ancestor = card.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      if (cards.has(ancestor)) return false;
+    }
+    return true;
+  });
 }
 
-function mapNote(card: Element): NoteRecord | null {
-  const link = [...card.querySelectorAll('a[href]')].find(anchor => {
-    const href = anchor.getAttribute('href') ?? '';
-    return href.includes('/explore/') || href.includes('/discovery/item/');
-  });
-  const noteUrl = normalizeNoteUrl(link?.getAttribute('href'));
-  const id = extractNoteId(noteUrl);
-  if (!noteUrl || !id) return null;
+function noteLink(card: Element, base: string): { id: string; noteUrl: string } | null {
+  for (const anchor of card.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]')) {
+    const noteUrl = normalizeNoteUrl(anchor.getAttribute('href'), base);
+    const id = extractNoteId(noteUrl);
+    if (noteUrl && id) return { id, noteUrl };
+  }
+  return null;
+}
 
-  const likes = firstText(card, [
-    '[data-testid="like-count"]',
-    '.like-count',
-    '[class*="like"]',
-  ]);
+function likesRaw(card: Element): string {
+  const roots = new Set<Element>();
+  for (const selector of ['[data-testid="like-count"]', '.like-count', '[class*="like"]']) {
+    for (const root of card.querySelectorAll(selector)) roots.add(root);
+  }
+  for (const root of roots) {
+    const count = usableCount(root, ['strong', '.count', 'b', 'span']);
+    if (count) return count;
+  }
+  return '';
+}
+
+function mapNote(card: Element, base: string): NoteRecord | null {
+  const link = noteLink(card, base);
+  if (!link) return null;
+
   const videoMarker = card.querySelector([
     'video',
     '[data-testid="video"]',
@@ -73,58 +136,71 @@ function mapNote(card: Element): NoteRecord | null {
     '[aria-label*="视频"]',
   ].join(','));
   return {
-    id,
+    id: link.id,
     title: firstText(card, ['[data-testid="note-title"]', '.title', '[class*="title"]', 'h2', 'h3']),
-    noteUrl,
+    noteUrl: link.noteUrl,
     type: videoMarker ? 'video' : 'image',
-    likes: parseCount(likes),
-    coverUrl: firstAttribute(card, ['a.cover img', 'img'], 'src'),
+    likes: parseCount(likesRaw(card)),
+    coverUrl: imageUrl(card, ['a.cover img', 'img'], base),
     exportNotes: [],
   };
+}
+
+function profileRoot(doc: Document): ParentNode {
+  for (const selector of ['[data-testid="profile-header"]', 'section.user', '.user-info']) {
+    const root = doc.querySelector(selector);
+    if (root) return root;
+  }
+  return doc;
 }
 
 export function parseDomPage(
   doc: Document,
   profileUrl: string,
 ): { profile: Partial<ProfileRecord>; notes: NoteRecord[] } {
-  const rawRedId = firstText(doc, [
-    '.user-redId',
-    '.user-redid',
+  const root = profileRoot(doc);
+  const rawRedId = firstText(root, [
     '[data-testid="user-redId"]',
     '[data-testid="user-red-id"]',
     '[data-testid="red-id"]',
+    '.user-redId',
+    '.user-redid',
     '[class*="redId"]',
   ]);
-  const rawIpLocation = firstText(doc, [
-    '.user-IP',
-    '.user-ip',
+  const rawIpLocation = firstText(root, [
     '[data-testid="user-IP"]',
     '[data-testid="ip-location"]',
+    '.user-IP',
+    '.user-ip',
     '.ip-location',
   ]);
-  const avatarUrl = firstAttribute(doc, [
-    'img.user-avatar',
-    '.user-avatar img',
-    '[class*="avatar"] img',
-    'img[data-testid="user-avatar"]',
-    '[data-testid="user-avatar"] img',
-    'img[data-testid="avatar"]',
-    '[data-testid="avatar"] img',
-    'img[class*="avatar"]',
-  ], 'src');
 
   return {
     profile: {
       profileUrl,
-      accountName: firstText(doc, ['.user-name', '[data-testid="user-name"]', '.nickname', '[data-testid="nickname"]']),
+      accountName: firstText(root, [
+        '[data-testid="user-name"]',
+        '[data-testid="nickname"]',
+        '.user-name',
+        '.nickname',
+      ]),
       redId: stripLabel(rawRedId, '小红书号'),
-      avatarUrl,
-      description: firstText(doc, [
-        '.user-desc',
-        '[class*="user-desc"]',
+      avatarUrl: imageUrl(root, [
+        'img[data-testid="user-avatar"]',
+        '[data-testid="user-avatar"] img',
+        'img[data-testid="avatar"]',
+        '[data-testid="avatar"] img',
+        'img.user-avatar',
+        '.user-avatar img',
+        'img[class*="avatar"]',
+        '[class*="avatar"] img',
+      ], profileUrl),
+      description: firstText(root, [
         '[data-testid="user-desc"]',
-        '.desc',
         '[data-testid="description"]',
+        '.user-desc',
+        '.desc',
+        '[class*="user-desc"]',
       ]),
       ipLocation: stripLabel(rawIpLocation, 'IP属地'),
       following: parseCount(statRaw(doc, '关注')),
@@ -132,6 +208,6 @@ export function parseDomPage(
       likedAndCollected: parseCount(statRaw(doc, '获赞与收藏')),
       exportNotes: [],
     },
-    notes: noteCards(doc).map(mapNote).filter((note): note is NoteRecord => note !== null),
+    notes: noteCards(doc).map(card => mapNote(card, profileUrl)).filter((note): note is NoteRecord => note !== null),
   };
 }

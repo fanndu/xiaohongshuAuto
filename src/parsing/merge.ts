@@ -17,6 +17,7 @@ function countRaw(value: unknown): string {
 }
 
 function firstCount(structured: unknown, dom: unknown): CountValue {
+  // A non-empty structured raw count is authoritative over a DOM fallback.
   return parseCount(firstString(countRaw(structured), countRaw(dom)));
 }
 
