@@ -170,6 +170,7 @@ describe('CollectorController', () => {
     const second = controller.exportPartial();
     expect(second).toBe(first);
     expect(deps.readProfile).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(deps.exportResult).toHaveBeenCalledTimes(1));
     expect(deps.exportResult).toHaveBeenCalledTimes(1);
 
     exported.resolve();
@@ -260,5 +261,144 @@ describe('CollectorController', () => {
     expect(deps.collect).not.toHaveBeenCalled();
     expect(deps.exportResult).not.toHaveBeenCalled();
     expect(unhandled).not.toHaveBeenCalled();
+  });
+
+  it('serializes a newer automatic export behind a pending manual export', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const exportResult = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const deps = dependencies({ exportResult });
+    const controller = new CollectorController(deps);
+
+    const manual = controller.exportPartial();
+    const started = controller.start();
+    await Promise.resolve();
+    expect(exportResult).toHaveBeenCalledTimes(1);
+
+    first.resolve();
+    await manual;
+    await Promise.resolve();
+    expect(exportResult).toHaveBeenCalledTimes(2);
+    second.resolve();
+    await started;
+    expect(deps.ui.render).toHaveBeenLastCalledWith({ phase: 'complete', count: 1 });
+  });
+
+  it('does not let an old manual export failure overwrite a queued newer automatic success', async () => {
+    const first = deferred<void>();
+    const second = deferred<void>();
+    const exportResult = vi.fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise);
+    const deps = dependencies({ exportResult });
+    const controller = new CollectorController(deps);
+
+    const manual = controller.exportPartial();
+    const started = controller.start();
+    first.reject(new Error('old export failure'));
+    await manual;
+    await Promise.resolve();
+    second.resolve();
+    await started;
+
+    expect(deps.ui.render).toHaveBeenLastCalledWith({ phase: 'complete', count: 1 });
+    expect(deps.ui.render).not.toHaveBeenCalledWith({
+      phase: 'failed', count: 0, message: 'Excel 生成失败，可重试或导出已有数据',
+    });
+  });
+
+  it('invalidates an old manual export failure when retry begins a new run', async () => {
+    const exported = deferred<void>();
+    const retryResult = deferred<{ reason: 'stopped'; notes: NoteRecord[] }>();
+    const deps = dependencies({
+      collect: vi.fn()
+        .mockResolvedValueOnce({ reason: 'stopped', notes: [note('saved')] })
+        .mockImplementationOnce(() => retryResult.promise),
+      exportResult: vi.fn(() => exported.promise),
+    });
+    const controller = new CollectorController(deps);
+
+    await controller.start();
+    const manual = controller.exportPartial();
+    await vi.waitFor(() => expect(deps.exportResult).toHaveBeenCalledTimes(1));
+    const retried = controller.retry();
+    exported.reject(new Error('old failure'));
+    await manual;
+    retryResult.resolve({ reason: 'stopped', notes: [note('new')] });
+    await retried;
+
+    expect(deps.ui.render).not.toHaveBeenCalledWith({
+      phase: 'failed', count: 1, message: 'Excel 生成失败，可重试或导出已有数据',
+    });
+    expect(deps.ui.render).toHaveBeenLastCalledWith({
+      phase: 'paused', count: 1, message: '已停止，可导出当前结果',
+    });
+  });
+
+  it('returns the exact active promise from retry', async () => {
+    const result = deferred<{ reason: 'complete'; notes: NoteRecord[] }>();
+    const deps = dependencies({ collect: vi.fn(() => result.promise) });
+    const controller = new CollectorController(deps);
+
+    const started = controller.start();
+    expect(controller.retry()).toBe(started);
+    result.resolve({ reason: 'complete', notes: [] });
+    await started;
+  });
+
+  it('pauses without exporting when stop wins immediately after a complete result resolves', async () => {
+    const result = deferred<{ reason: 'complete'; notes: NoteRecord[] }>();
+    const deps = dependencies({ collect: vi.fn(() => result.promise) });
+    const controller = new CollectorController(deps);
+
+    const started = controller.start();
+    result.resolve({ reason: 'complete', notes: [note('saved')] });
+    controller.stop();
+    await started;
+
+    expect(deps.exportResult).not.toHaveBeenCalled();
+    expect(deps.ui.render).toHaveBeenLastCalledWith({
+      phase: 'paused', count: 1, message: '已停止，可导出当前结果',
+    });
+  });
+
+  it('does not let stop interrupt a committed automatic export', async () => {
+    const exported = deferred<void>();
+    let signal: AbortSignal | undefined;
+    const deps = dependencies({
+      collect: vi.fn((nextSignal: AbortSignal) => {
+        signal = nextSignal;
+        return Promise.resolve({ reason: 'complete' as const, notes: [note('done')] });
+      }),
+      exportResult: vi.fn(() => exported.promise),
+    });
+    const controller = new CollectorController(deps);
+
+    const started = controller.start();
+    await vi.waitFor(() => expect(deps.exportResult).toHaveBeenCalledTimes(1));
+    controller.stop();
+    expect(signal?.aborted).toBe(false);
+    exported.resolve();
+    await started;
+    expect(deps.ui.render).toHaveBeenLastCalledWith({ phase: 'complete', count: 1 });
+  });
+
+  it('retains CollectionError notes when stop wins the same turn and exports that partial snapshot', async () => {
+    const rejected = deferred<never>();
+    const deps = dependencies({ collect: vi.fn(() => rejected.promise) });
+    const controller = new CollectorController(deps);
+
+    const started = controller.start();
+    rejected.reject(new CollectionError('LOAD_STALLED', [note('attached')]));
+    controller.stop();
+    await started;
+    await controller.exportPartial();
+
+    expect(deps.ui.render).toHaveBeenLastCalledWith({
+      phase: 'paused', count: 1, message: '已停止，可导出当前结果',
+    });
+    expect(deps.exportResult).toHaveBeenLastCalledWith({ profile: profile(), notes: [note('attached')] });
   });
 });
