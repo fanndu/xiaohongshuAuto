@@ -227,6 +227,12 @@ describe('browserScrollEnvironment', () => {
     expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<div class="captcha-modal">验证码</div>';
     expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div class="access-frequency-dialog">访问频繁</div>';
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div class="risk-control-modal">操作频繁</div>';
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div class="verification-overlay">人机验证</div>';
+    expect(env.hasAccessBlock()).toBe(true);
     document.body.innerHTML = '<article class="verify-article">安全验证最佳实践</article>';
     expect(env.hasAccessBlock()).toBe(false);
     document.body.innerHTML = '<main><h1>验证码帮助中心</h1><p>人机验证教程</p></main>';

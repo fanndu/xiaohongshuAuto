@@ -133,9 +133,9 @@ function isVisible(element: Element, win: Window): boolean {
 function isChallengeContainer(element: Element): boolean {
   if (element.getAttribute('role') === 'dialog' || element.getAttribute('aria-modal') === 'true') return true;
   const tokens = [...element.classList];
-  const hasVerificationToken = tokens.some(token => /(captcha|verify|verification)/i.test(token));
-  const hasOverlayToken = tokens.some(token => /(modal|dialog|popup|container|mask|challenge)/i.test(token));
-  return hasVerificationToken && hasOverlayToken;
+  const hasChallengeToken = tokens.some(token => /(captcha|verify|verification|access-frequency|risk-control)/i.test(token));
+  const hasOverlayToken = tokens.some(token => /(modal|dialog|popup|container|mask|overlay|challenge)/i.test(token));
+  return hasChallengeToken && hasOverlayToken;
 }
 
 /** Browser adapter that detects only modal-like verification and rate-limit challenges. */
@@ -154,6 +154,8 @@ function createBrowserScrollEnvironment(doc: Document, win: Window): ScrollEnvir
         '[class*="captcha"]',
         '[class*="verify"]',
         '[class*="verification"]',
+        '[class*="access-frequency"]',
+        '[class*="risk-control"]',
       ].join(','));
       return [...candidates].some(element => {
         const text = element.textContent?.trim() ?? '';
