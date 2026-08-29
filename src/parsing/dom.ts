@@ -28,7 +28,24 @@ function safeImageUrl(value: string, base: string): string {
 }
 
 function srcsetCandidates(srcset: string): string[] {
-  return srcset.split(',').map(candidate => candidate.trim().split(/\s+/, 1)[0] ?? '');
+  const candidates: string[] = [];
+  let index = 0;
+  while (index < srcset.length) {
+    while (index < srcset.length && /[\s,]/.test(srcset[index] ?? '')) index += 1;
+    if (index >= srcset.length) break;
+
+    const start = index;
+    const isDataUrl = srcset.slice(index, index + 5).toLowerCase() === 'data:';
+    while (index < srcset.length && (isDataUrl
+      ? !/\s/.test(srcset[index] ?? '')
+      : !/[\s,]/.test(srcset[index] ?? ''))) index += 1;
+    const candidate = srcset.slice(start, index);
+    if (candidate) candidates.push(candidate);
+
+    while (index < srcset.length && srcset[index] !== ',') index += 1;
+    if (srcset[index] === ',') index += 1;
+  }
+  return candidates;
 }
 
 function imageUrl(root: ParentNode, selectors: string[], base: string): string {
@@ -43,6 +60,7 @@ function imageUrl(root: ParentNode, selectors: string[], base: string): string {
         image.getAttribute('data-src') ?? '',
         image.getAttribute('data-original') ?? '',
         ...srcsetCandidates(image.getAttribute('srcset') ?? ''),
+        ...srcsetCandidates(image.getAttribute('data-srcset') ?? ''),
       ];
       for (const candidate of candidates) {
         const url = candidate ? safeImageUrl(candidate, base) : '';
@@ -92,16 +110,7 @@ function statRaw(doc: Document, label: string): string {
 }
 
 function noteCards(doc: Document): Element[] {
-  const cards = new Set<Element>();
-  for (const selector of ['.note-item', '[class*="note-item"]', 'section.feeds-page article']) {
-    for (const card of doc.querySelectorAll(selector)) cards.add(card);
-  }
-  return [...cards].filter(card => {
-    for (let ancestor = card.parentElement; ancestor; ancestor = ancestor.parentElement) {
-      if (cards.has(ancestor)) return false;
-    }
-    return true;
-  });
+  return [...doc.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')];
 }
 
 function noteLink(card: Element, base: string): { id: string; noteUrl: string } | null {
@@ -144,6 +153,44 @@ function mapNote(card: Element, base: string): NoteRecord | null {
     coverUrl: imageUrl(card, ['a.cover img', 'img'], base),
     exportNotes: [],
   };
+}
+
+function mergeDuplicateNote(existing: NoteRecord, later: NoteRecord): NoteRecord {
+  // DOM order makes nested child cards later and therefore more specific on conflicts.
+  return {
+    ...existing,
+    id: later.id || existing.id,
+    noteUrl: later.noteUrl || existing.noteUrl,
+    title: later.title || existing.title,
+    type: later.type === 'unknown' ? existing.type : later.type,
+    likes: later.likes.raw ? later.likes : existing.likes,
+    coverUrl: later.coverUrl || existing.coverUrl,
+    exportNotes: [...new Set([...existing.exportNotes, ...later.exportNotes])],
+  };
+}
+
+function uniqueNotes(cards: Element[], base: string): NoteRecord[] {
+  const notes: NoteRecord[] = [];
+  const indexesById = new Map<string, number>();
+  const indexesByUrl = new Map<string, number>();
+  for (const card of cards) {
+    const note = mapNote(card, base);
+    if (!note) continue;
+    const existingIndex = indexesById.get(note.id) ?? indexesByUrl.get(note.noteUrl);
+    if (existingIndex === undefined) {
+      indexesById.set(note.id, notes.length);
+      indexesByUrl.set(note.noteUrl, notes.length);
+      notes.push(note);
+      continue;
+    }
+    const existing = notes[existingIndex];
+    if (!existing) continue;
+    const merged = mergeDuplicateNote(existing, note);
+    notes[existingIndex] = merged;
+    indexesById.set(merged.id, existingIndex);
+    indexesByUrl.set(merged.noteUrl, existingIndex);
+  }
+  return notes;
 }
 
 function profileRoot(doc: Document): ParentNode {
@@ -208,6 +255,6 @@ export function parseDomPage(
       likedAndCollected: parseCount(statRaw(doc, '获赞与收藏')),
       exportNotes: [],
     },
-    notes: noteCards(doc).map(card => mapNote(card, profileUrl)).filter((note): note is NoteRecord => note !== null),
+    notes: uniqueNotes(noteCards(doc), profileUrl),
   };
 }

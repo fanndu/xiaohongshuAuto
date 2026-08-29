@@ -226,6 +226,50 @@ describe('parseDomPage', () => {
     expect(parseDomPage(document, profileUrl).notes).toHaveLength(1);
   });
 
+  it('keeps both real cards under a broad note-item list without duplicate mixed records', () => {
+    document.body.innerHTML = `
+      <div class="note-item-list">
+        <article class="note-item">
+          <a href="/explore/first-id"><span class="title">第一篇</span></a>
+        </article>
+        <article class="note-item">
+          <a href="/explore/second-id"><span class="title">第二篇</span></a>
+          <span class="video-icon"></span>
+        </article>
+      </div>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([
+      { id: 'first-id', title: '第一篇', type: 'image' },
+      { id: 'second-id', title: '第二篇', type: 'video' },
+    ]);
+    expect(parseDomPage(document, profileUrl).notes).toHaveLength(2);
+  });
+
+  it('tokenizes data srcsets without treating rejected fragments as relative URLs', () => {
+    document.body.innerHTML = `
+      <section class="user">
+        <img class="user-avatar" src="javascript:alert(1)" srcset="data:image/svg+xml,%3Csvg%3E 1x, https://img.example/real.jpg 2x">
+      </section>
+      <article class="note-item">
+        <a href="/explore/data-only"></a>
+        <a class="cover"><img src="javascript:alert(1)" srcset="data:image/svg+xml,%3Csvg%3E 1x"></a>
+      </article>
+      <article class="note-item">
+        <a href="/explore/lazy-srcset"></a>
+        <a class="cover"><img src="javascript:alert(1)" data-srcset="https://img.example/lazy-srcset.jpg 1x"></a>
+      </article>
+    `;
+
+    expect(parseDomPage(document, profileUrl)).toMatchObject({
+      profile: { avatarUrl: 'https://img.example/real.jpg' },
+      notes: [
+        { id: 'data-only', coverUrl: '' },
+        { id: 'lazy-srcset', coverUrl: 'https://img.example/lazy-srcset.jpg' },
+      ],
+    });
+  });
+
   it('does not throw for an empty DOM', () => {
     document.body.innerHTML = '';
 
