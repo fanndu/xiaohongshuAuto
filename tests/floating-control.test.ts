@@ -25,17 +25,18 @@ function action(control: FloatingControl, name: string): HTMLButtonElement {
 }
 
 afterEach(() => {
-  document.getElementById('xhs-profile-collector')?.remove();
+  document.querySelectorAll('#xhs-profile-collector').forEach((host) => host.remove());
 });
 
 describe('FloatingControl', () => {
-  it('creates a reset isolated host with a fixed local panel', () => {
+  it('creates a closed, reset isolated host with a fixed local panel', () => {
     const control = new FloatingControl(makeActions());
     const style = control.root.querySelector('style')?.textContent;
 
     expect(control.host.id).toBe('xhs-profile-collector');
     expect(control.host.parentElement).toBe(document.documentElement);
     expect(control.root).toBeInstanceOf(ShadowRoot);
+    expect(control.host.shadowRoot).toBeNull();
     expect(style).toMatch(/:host\s*\{\s*all:\s*initial;/);
     expect(style).toMatch(/\.panel\s*\{[^}]*position:\s*fixed;/);
     expect(style).toMatch(/\.panel\s*\{[^}]*right:\s*24px;/);
@@ -43,6 +44,16 @@ describe('FloatingControl', () => {
     expect(style).toMatch(/\.panel\s*\{[^}]*z-index:\s*2147483647;/);
     expect(style).toMatch(/\.panel\s*\{[^}]*width:\s*176px;/);
     expect(style).toMatch(/\.panel\s*\{[^}]*padding:\s*12px;/);
+  });
+
+  it('uses inline important host defenses against hostile page CSS', () => {
+    const control = new FloatingControl(makeActions());
+
+    expect(control.host.style.getPropertyValue('display')).toBe('block');
+    expect(control.host.style.getPropertyPriority('display')).toBe('important');
+    expect(control.host.style.getPropertyValue('visibility')).toBe('visible');
+    expect(control.host.style.getPropertyValue('opacity')).toBe('1');
+    expect(control.host.style.getPropertyPriority('opacity')).toBe('important');
   });
 
   it.each([
@@ -74,7 +85,7 @@ describe('FloatingControl', () => {
     expect([...control.root.querySelectorAll('.detail')].map((element) => element.textContent)).toEqual(['采集失败', '已发现 0 篇']);
   });
 
-  it('calls each exact action once, supports nested button content, and ignores unknown targets', () => {
+  it('calls each exact action once, supports nested button content, and ignores injected or mutated buttons', () => {
     const actions = makeActions();
     const control = new FloatingControl(actions);
 
@@ -89,9 +100,12 @@ describe('FloatingControl', () => {
     action(control, 'retry').click();
     action(control, 'exportPartial').click();
     const unknown = document.createElement('button');
-    unknown.dataset.action = 'unknown';
+    unknown.dataset.action = 'start';
     control.root.append(unknown);
     unknown.click();
+    const mutatedRetry = action(control, 'retry');
+    mutatedRetry.dataset.action = 'start';
+    mutatedRetry.click();
     const nonButton = document.createElement('div');
     control.root.append(nonButton);
     nonButton.click();
@@ -133,35 +147,78 @@ describe('FloatingControl', () => {
     control.render(states.ready);
 
     action(control, 'start').click();
-    action(control, 'start').click();
+    expect(control.root.querySelector('.title')?.textContent).toBe('采集失败');
+    action(control, 'retry').click();
 
-    expect(actions.start).toHaveBeenCalledTimes(2);
+    expect(actions.start).toHaveBeenCalledTimes(1);
+    expect(actions.retry).toHaveBeenCalledTimes(1);
   });
 
-  it('replaces a stale global host and destroys safely', () => {
-    const stale = document.createElement('div');
-    stale.id = 'xhs-profile-collector';
-    document.documentElement.append(stale);
-    const actions = makeActions();
-    const control = new FloatingControl(actions);
+  it('destroys the prior live control so retained buttons cannot invoke it', () => {
+    const firstActions = makeActions();
+    const first = new FloatingControl(firstActions);
+    first.render(states.ready);
+    const staleButton = action(first, 'start');
+    const secondActions = makeActions();
+    const second = new FloatingControl(secondActions);
+    second.render(states.ready);
 
-    expect(document.querySelectorAll('#xhs-profile-collector')).toHaveLength(1);
-    expect(document.getElementById('xhs-profile-collector')).toBe(control.host);
+    staleButton.click();
+    action(second, 'start').click();
+
+    expect(firstActions.start).not.toHaveBeenCalled();
+    expect(secondActions.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a page-owned id collision and destroys its own host safely', () => {
+    const pageHost = document.createElement('div');
+    pageHost.id = 'xhs-profile-collector';
+    document.documentElement.append(pageHost);
+    const control = new FloatingControl(makeActions());
+
+    expect(pageHost.isConnected).toBe(true);
+    expect(document.querySelectorAll('#xhs-profile-collector')).toHaveLength(2);
     control.destroy();
     control.destroy();
     control.render(states.ready);
-    expect(document.getElementById('xhs-profile-collector')).toBeNull();
+    expect(pageHost.isConnected).toBe(true);
     expect(control.root.querySelector('button')).toBeNull();
   });
 
-  it('exposes accessible status and buttons', () => {
+  it('keeps an accessible status shell and transfers focus across renders', () => {
     const control = new FloatingControl(makeActions());
+    control.render(states.ready);
+    action(control, 'start').focus();
     control.render(states.collecting);
     const status = control.root.querySelector('[role="status"]');
     const button = action(control, 'stop');
 
     expect(status?.getAttribute('aria-live')).toBe('polite');
+    expect(status?.getAttribute('aria-atomic')).toBe('true');
     expect(button.type).toBe('button');
     expect(button.getAttribute('aria-label')).toBe('停止采集');
+    expect(control.root.activeElement).toBe(button);
+    control.render(states.complete);
+    expect(status?.getAttribute('tabindex')).toBe('-1');
+    expect(control.root.activeElement).toBe(status);
+  });
+
+  it('contains asynchronous action rejection and remains usable', async () => {
+    const actions: UiActions = {
+      ...makeActions(),
+      start: vi.fn(() => Promise.reject(new Error('boom'))),
+    };
+    const control = new FloatingControl(actions);
+    control.render(states.ready);
+    action(control, 'start').click();
+    await Promise.resolve();
+
+    expect(control.root.querySelector('.title')?.textContent).toBe('采集失败');
+    expect(control.root.querySelector('.detail')?.textContent).toBe('操作失败，请重试');
+    action(control, 'retry').click();
+    expect(actions.retry).toHaveBeenCalledTimes(1);
+    control.destroy();
+    await Promise.resolve();
+    expect(control.host.isConnected).toBe(false);
   });
 });
