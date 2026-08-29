@@ -140,6 +140,7 @@ const PROFILE_ROOT_SELECTORS = [
   'section.user',
   '.user-info',
 ];
+const PROFILE_HEADER_SELECTORS = ['[data-testid="profile-header"]', 'section.user', '.user-info'];
 
 function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const values = new Set<string>();
@@ -322,7 +323,12 @@ function currentStatsScope(
   base: string,
 ): Element | null {
   if (!scope) return null;
-  const candidates = [scope, ...PROFILE_ROOT_SELECTORS.flatMap(selector => [...scope.querySelectorAll(selector)])];
+  // A nested header belongs to this validated scope unless it provides conflicting explicit identity.
+  // Check it before the broad scope, whose earlier sibling stats may describe an older render.
+  const candidates = [
+    ...PROFILE_HEADER_SELECTORS.flatMap(selector => [...scope.querySelectorAll(selector)]),
+    scope,
+  ];
   for (const candidate of candidates) {
     if (!hasStats(candidate)) continue;
     const identity = elementIdentity(candidate, base);

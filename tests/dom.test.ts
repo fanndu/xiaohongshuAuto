@@ -445,4 +445,19 @@ describe('parseDomPage', () => {
       notes: [{ id: 'bob-scope-note' }],
     });
   });
+
+  it('prefers stats in the current header over earlier wider-scope stats', () => {
+    document.body.innerHTML = `
+      <main class="profile-page" data-user-id="bob">
+        <div class="data-info"><div class="data-item"><span>关注</span><strong>77</strong></div></div>
+        <section data-testid="profile-header">
+          <span class="user-name">Bob</span>
+          <div class="data-info"><div class="data-item"><span>关注</span><strong>7</strong></div></div>
+        </section>
+        <section class="feeds-page"><article class="note-item"><a href="/explore/bob-header-note"></a></article></section>
+      </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      profile: { following: { raw: '7', value: 7 } }, notes: [{ id: 'bob-header-note' }],
+    });
+  });
 });
