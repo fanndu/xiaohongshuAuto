@@ -141,6 +141,7 @@ const PROFILE_ROOT_SELECTORS = [
   '.user-info',
 ];
 const PROFILE_HEADER_SELECTORS = ['[data-testid="profile-header"]', 'section.user', '.user-info'];
+const PROFILE_SCOPE_SELECTOR = '[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page';
 
 function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const values = new Set<string>();
@@ -166,28 +167,44 @@ interface BoundWorksContainer {
   scope: Element;
 }
 
+function selectorCandidates(scope: Element, selectors: readonly string[]): Element[] {
+  const candidates = new Set<Element>();
+  for (const selector of selectors) {
+    if (scope.matches(selector)) candidates.add(scope);
+    for (const candidate of scope.querySelectorAll(selector)) candidates.add(candidate);
+  }
+  return [...candidates];
+}
+
+function splitCurrentCandidates(candidates: readonly Element[], userId: string, base: string): {
+  exact: Element[];
+  unbound: Element[];
+} {
+  const exact: Element[] = [];
+  const unbound: Element[] = [];
+  for (const candidate of candidates) {
+    const identity = elementIdentity(candidate, base);
+    if (identity.identityStatus === 'valid' && identity.userId === userId) exact.push(candidate);
+    else if (identity.identityStatus === 'missing') unbound.push(candidate);
+    // Explicit conflicts and different identities are never eligible.
+  }
+  return { exact, unbound };
+}
+
+function validatedProfileScope(root: Element | null): Element | null {
+  return root?.closest(PROFILE_SCOPE_SELECTOR) ?? root;
+}
+
 /** Select only a works area bound by the current header root or by its own explicit identity. */
 function worksContainer(doc: Document, root: Element | null, userId: string, base: string): BoundWorksContainer | null {
-  if (!root || !userId) return null;
-  for (const candidate of root.querySelectorAll(WORKS_SELECTOR)) {
-    const identity = elementIdentity(candidate, base);
-    if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
-    return { container: candidate, scope: root };
-  }
-  // A recognized narrow profile page may bind a sibling header and works panel together.
-  const scope = root.closest('[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page');
-  if (scope) {
-    for (const candidate of scope.querySelectorAll(WORKS_SELECTOR)) {
-      const identity = elementIdentity(candidate, base);
-      if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
-      return { container: candidate, scope };
-    }
-  }
-  // Global content must carry its own explicit current identity; never take the first feed.
-  for (const candidate of doc.querySelectorAll(WORKS_SELECTOR)) {
-    const identity = elementIdentity(candidate, base);
-    if (identity.identityStatus === 'valid' && identity.userId === userId) return { container: candidate, scope: root };
-  }
+  const scope = validatedProfileScope(root);
+  if (!scope || !userId) return null;
+  const scoped = splitCurrentCandidates(selectorCandidates(scope, [WORKS_SELECTOR]), userId, base);
+  if (scoped.exact[0]) return { container: scoped.exact[0], scope };
+  // A separately rendered global works area needs its own exact identity; it outranks stale unbound markup.
+  const globalExact = splitCurrentCandidates([...doc.querySelectorAll(WORKS_SELECTOR)], userId, base).exact[0];
+  if (globalExact) return { container: globalExact, scope };
+  if (scoped.unbound.length === 1) return { container: scoped.unbound[0]!, scope };
   return null;
 }
 
@@ -317,25 +334,15 @@ function hasStats(scope: ParentNode): boolean {
 }
 
 /** Prefer a current header's stats over wider scope stats when both are available. */
-function currentStatsScope(
+function currentHeader(
   scope: Element | null,
   userId: string,
   base: string,
 ): Element | null {
   if (!scope) return null;
-  // A nested header belongs to this validated scope unless it provides conflicting explicit identity.
-  // Check it before the broad scope, whose earlier sibling stats may describe an older render.
-  const candidates = [
-    ...PROFILE_HEADER_SELECTORS.flatMap(selector => [...scope.querySelectorAll(selector)]),
-    scope,
-  ];
-  for (const candidate of candidates) {
-    if (!hasStats(candidate)) continue;
-    const identity = elementIdentity(candidate, base);
-    if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
-    return candidate;
-  }
-  return null;
+  const candidates = splitCurrentCandidates(selectorCandidates(scope, PROFILE_HEADER_SELECTORS), userId, base);
+  if (candidates.exact[0]) return candidates.exact[0];
+  return candidates.unbound.length === 1 ? candidates.unbound[0] ?? null : null;
 }
 
 export function parseDomPage(
@@ -344,8 +351,10 @@ export function parseDomPage(
 ): DomPageResult {
   const selectedRoot = profileRootElement(doc, profileUrl);
   const rootElement = selectedRoot.root;
-  const root = rootElement ?? doc;
   const identity = selectedRoot.identity;
+  const scope = validatedProfileScope(rootElement);
+  const header = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key
+    ? currentHeader(scope, identity.userId, profileUrl) : null;
   const currentWorks = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key
     ? worksContainer(doc, rootElement, identity.userId, profileUrl)
     // Diagnostics retain parser output for incomplete pages; the mount gate never treats
@@ -353,34 +362,35 @@ export function parseDomPage(
     : null;
   const diagnosticWorks = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc.querySelector(WORKS_SELECTOR));
   const noteScope = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc);
-  const statScope = currentStatsScope(rootElement, identity.userId, profileUrl)
-    ?? currentWorks?.scope ?? rootElement ?? doc;
-  const rawRedId = firstText(root, [
+  const statScope = header && hasStats(header) ? header : currentWorks?.scope ?? scope ?? doc;
+  // Missing/conflicting identity is never mountable, but legacy callers may still inspect diagnostics.
+  const fieldRoot = header ?? (identity.identityStatus === 'valid' ? null : rootElement ?? doc);
+  const rawRedId = fieldRoot ? firstText(fieldRoot, [
     '[data-testid="user-redId"]',
     '[data-testid="user-red-id"]',
     '[data-testid="red-id"]',
     '.user-redId',
     '.user-redid',
     '[class*="redId"]',
-  ]);
-  const rawIpLocation = firstText(root, [
+  ]) : '';
+  const rawIpLocation = fieldRoot ? firstText(fieldRoot, [
     '[data-testid="user-IP"]',
     '[data-testid="ip-location"]',
     '.user-IP',
     '.user-ip',
     '.ip-location',
-  ]);
+  ]) : '';
 
   const profile = {
     profileUrl,
-    accountName: firstText(root, [
+    accountName: fieldRoot ? firstText(fieldRoot, [
       '[data-testid="user-name"]',
       '[data-testid="nickname"]',
       '.user-name',
       '.nickname',
-    ]),
+    ]) : '',
     redId: stripLabel(rawRedId, '小红书号'),
-    avatarUrl: imageUrl(root, [
+    avatarUrl: fieldRoot ? imageUrl(fieldRoot, [
       'img[data-testid="user-avatar"]',
       '[data-testid="user-avatar"] img',
       'img[data-testid="avatar"]',
@@ -389,14 +399,14 @@ export function parseDomPage(
       '.user-avatar img',
       'img[class*="avatar"]',
       '[class*="avatar"] img',
-    ], profileUrl),
-    description: firstText(root, [
+    ], profileUrl) : '',
+    description: fieldRoot ? firstText(fieldRoot, [
       '[data-testid="user-desc"]',
       '[data-testid="description"]',
       '.user-desc',
       '.desc',
       '[class*="user-desc"]',
-    ]),
+    ]) : '',
     ipLocation: stripLabel(rawIpLocation, 'IP属地'),
     following: parseCount(statRaw(statScope, '关注')),
     followers: parseCount(statRaw(statScope, '粉丝')),

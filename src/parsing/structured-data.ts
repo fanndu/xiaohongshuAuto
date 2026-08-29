@@ -2,6 +2,7 @@ import { parse } from 'acorn-loose';
 import { tokenizer } from 'acorn';
 import type { Node } from 'acorn';
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
+import { mergedExportNotes, mergeNoteType } from '../domain/note-type';
 import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 
 type JsonRecord = Record<string, unknown>;
@@ -367,6 +368,14 @@ function coverUrl(cover: JsonRecord | null): string {
   return firstString(own(cover, 'urlDefault'), own(cover, 'urlPre'), own(cover, 'url'), own(cover, 'url_default'), infoUrl);
 }
 
+function noteIdEvidence(source: JsonRecord | null): { ids: string[]; urls: Array<{ id: string; url: string }> } {
+  if (!source) return { ids: [], urls: [] };
+  const ids = [own(source, 'id'), own(source, 'noteId')].map(string).filter(Boolean);
+  const urls = [own(source, 'url')].map(value => normalizeNoteUrl(string(value)))
+    .map(url => ({ id: extractNoteId(url), url })).filter((value): value is { id: string; url: string } => Boolean(value.id));
+  return { ids, urls };
+}
+
 function mapNote(value: unknown, expectedIdentity: string): { note: NoteRecord | null; conflict: boolean } {
   const wrapper = record(value);
   const card = record(own(wrapper, 'noteCard'));
@@ -375,25 +384,32 @@ function mapNote(value: unknown, expectedIdentity: string): { note: NoteRecord |
   const identities = [...(wrapper ? noteIdentity(wrapper) : []), ...noteIdentity(source)];
   if (expectedIdentity && identities.some(identity => identity !== expectedIdentity)) return { note: null, conflict: true };
 
-  const suppliedId = firstString(own(wrapper, 'id'), own(wrapper, 'noteId'), own(source, 'id'), own(source, 'noteId'));
-  const explicitUrl = normalizeNoteUrl(firstString(own(wrapper, 'url'), own(source, 'url')));
-  const explicitId = extractNoteId(explicitUrl);
-  if (suppliedId && explicitId && suppliedId !== explicitId) return { note: null, conflict: false };
-
-  const id = suppliedId || explicitId;
-  const noteUrl = explicitId ? explicitUrl : generatedNoteUrl(suppliedId);
+  const wrapperEvidence = noteIdEvidence(wrapper);
+  const cardEvidence = source === wrapper ? { ids: [], urls: [] } : noteIdEvidence(source);
+  const evidence = new Set([
+    ...wrapperEvidence.ids, ...wrapperEvidence.urls.map(value => value.id),
+    ...cardEvidence.ids, ...cardEvidence.urls.map(value => value.id),
+  ]);
+  if (evidence.size !== 1) return { note: null, conflict: false };
+  const id = [...evidence][0] ?? '';
+  const explicitUrl = [...wrapperEvidence.urls, ...cardEvidence.urls].find(value => value.id === id)?.url ?? '';
+  const noteUrl = explicitUrl || generatedNoteUrl(id);
   if (!id || !noteUrl || extractNoteId(noteUrl) !== id) return { note: null, conflict: false };
 
   const cover = record(own(source, 'cover')) ?? record(own(wrapper, 'cover'));
   const interactInfo = record(own(source, 'interactInfo')) ?? record(own(wrapper, 'interactInfo'));
+  const media = mergeNoteType(
+    noteType(own(wrapper, 'type')),
+    noteType(own(source, 'type')),
+  );
   return { note: {
     id,
     title: firstString(own(source, 'displayTitle'), own(source, 'title'), own(wrapper, 'displayTitle'), own(wrapper, 'title')),
     noteUrl,
-    type: noteType(firstString(own(source, 'type'), own(wrapper, 'type'))),
+    type: media.type,
     likes: parseCount(firstString(own(interactInfo, 'likedCount'), own(source, 'likedCount'), own(wrapper, 'likedCount'))),
     coverUrl: firstString(coverUrl(cover), own(source, 'coverUrl'), own(wrapper, 'coverUrl')),
-    exportNotes: [],
+    exportNotes: mergedExportNotes([], [], media.conflict),
   }, conflict: false };
 }
 

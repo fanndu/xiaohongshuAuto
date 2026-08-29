@@ -633,4 +633,27 @@ describe('parseStructuredPage', () => {
 
     expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('较早有效状态');
   });
+
+  it('rejects wrapper/card note identity disagreement rather than producing a chimeric note', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userId: 'bob', userPageData: {
+      userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [{
+        id: 'wrapper-id', url: '/explore/wrapper-id', noteCard: { id: 'card-id', url: '/explore/card-id' },
+      }],
+    } } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob').notes).toEqual([]);
+  });
+
+  it.each([
+    ['wrapper-video', 'video', 'normal'],
+    ['card-video', 'normal', 'video'],
+  ])('keeps wrapper/card %s media evidence conflict-safe', (_name, wrapperType, cardType) => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userId: 'bob', userPageData: {
+      userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [{
+        id: 'same-note', type: wrapperType, noteCard: { type: cardType },
+      }],
+    } } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob').notes).toMatchObject([{
+      id: 'same-note', type: 'unknown', exportNotes: ['作品类型证据冲突'],
+    }]);
+  });
 });

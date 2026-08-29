@@ -460,4 +460,38 @@ describe('parseDomPage', () => {
       profile: { following: { raw: '7', value: 7 } }, notes: [{ id: 'bob-header-note' }],
     });
   });
+
+  it.each([
+    ['unbound-first', '<section class="feeds-page"><article class="note-item"><a href="/explore/stale-unbound"></a></article></section><section class="feeds-page" data-user-id="bob"><article class="note-item"><a href="/explore/current-bob"></a></article></section>'],
+    ['current-first', '<section class="feeds-page" data-user-id="bob"><article class="note-item"><a href="/explore/current-bob"></a></article></section><section class="feeds-page"><article class="note-item"><a href="/explore/stale-unbound"></a></article></section>'],
+  ])('prefers explicitly current works over an identity-less candidate (%s)', (_order, feeds) => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>${feeds}
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasWorksContainer: true, notes: [{ id: 'current-bob' }],
+    });
+  });
+
+  it('uses an explicit current header instead of an earlier unbound header for profile fields and stats', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header"><span class="user-name">Alice stale</span><div class="data-info"><div class="data-item"><span>关注</span><strong>99</strong></div></div></section>
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob current</span><div class="data-info"><div class="data-item"><span>关注</span><strong>7</strong></div></div></section>
+      <section class="feeds-page" data-user-id="bob"></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      profile: { accountName: 'Bob current', following: { raw: '7', value: 7 } },
+    });
+  });
+
+  it('does not accept ambiguous unbound headers inside a bound profile scope', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header"><span class="user-name">Maybe Alice</span></section>
+      <section data-testid="profile-header"><span class="user-name">Maybe Bob</span></section>
+      <section class="feeds-page" data-user-id="bob"></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', hasProfileEvidence: false, profile: { accountName: '' },
+    });
+  });
 });
