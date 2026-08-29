@@ -136,6 +136,110 @@ describe('buildWorkbookBuffer', () => {
     }
     expect(workbook.model.media).toEqual([]);
   });
+
+  it('round-trips OOXML-sensitive text and truncates at a whole Unicode character', async () => {
+    const sensitive = 'literal _x0041_\r\0\uFFFE\uD800😀\n保留';
+    const exactLimit = 'a'.repeat(32_767);
+    const emojiBoundary = `${'b'.repeat(32_766)}😀`;
+    const source = result();
+    source.profile.accountName = sensitive;
+    source.profile.description = exactLimit;
+    source.profile.ipLocation = emojiBoundary;
+
+    const workbook = await readWorkbook(source);
+    const profile = workbook.getWorksheet('博主信息');
+
+    expect(profile?.getCell('B3').value).toBe(sensitive);
+    expect(profile?.getCell('B6').value).toBe(exactLimit);
+    expect(profile?.getCell('B7').value).toBe('b'.repeat(32_766));
+    expect(profile?.getCell('B16').value).toContain('IP 属地超过 Excel 单元格限制，已截断');
+  });
+
+  it('keeps unsafe link fields as normalized text and records field-specific warnings', async () => {
+    const source = result();
+    source.profile.profileUrl = ' javascript:alert(1) ';
+    source.profile.avatarUrl = 'http://img.example/avatar.jpg';
+    source.notes[0]!.noteUrl = 'file:///private/note';
+    source.notes[0]!.coverUrl = 'data:image/png;base64,abc';
+
+    const workbook = await readWorkbook(source);
+    const profile = workbook.getWorksheet('博主信息');
+    const notes = workbook.getWorksheet('作品列表');
+
+    expect(profile?.getCell('B2').value).toBe('javascript:alert(1)');
+    expect(profile?.getCell('B2').hyperlink).toBeUndefined();
+    expect(profile?.getCell('B5').value).toBe('http://img.example/avatar.jpg');
+    expect(profile?.getCell('B16').value).toContain('主页链接不是安全 HTTPS 地址，已作为文本导出');
+    expect(profile?.getCell('B16').value).toContain('头像链接不是安全 HTTPS 地址，已作为文本导出');
+    expect(notes?.getCell('C2').value).toBe('file:///private/note');
+    expect(notes?.getCell('C2').hyperlink).toBeUndefined();
+    expect(notes?.getCell('H2').value).toBe('data:image/png;base64,abc');
+    expect(notes?.getCell('I2').value).toContain('作品链接不是安全 HTTPS 地址，已作为文本导出');
+    expect(notes?.getCell('I2').value).toContain('封面链接不是安全 HTTPS 地址，已作为文本导出');
+  });
+
+  it('retains zero numeric values and produces a valid header-only note sheet', async () => {
+    const empty = await readWorkbook(result({ notes: [] }));
+    expect(empty.getWorksheet('博主信息')?.getCell('B14').value).toBe(0);
+    expect(empty.getWorksheet('作品列表')?.rowCount).toBe(1);
+
+    const source = result();
+    source.notes[0]!.likes = { raw: '0', value: 0 };
+    const workbook = await readWorkbook(source);
+    expect(workbook.getWorksheet('作品列表')?.getCell('G2').value).toBe(0);
+  });
+
+  it('adds stable truncation and unsafe-link warnings for oversized note display fields', async () => {
+    const source = result({ notes: [result().notes[0]!] });
+    const note = source.notes[0]!;
+    const oversized = 'x'.repeat(32_768);
+    note.title = oversized;
+    note.id = oversized;
+    note.noteUrl = `http://${oversized}`;
+    note.coverUrl = `data:${oversized}`;
+    const original = { ...note };
+
+    const workbook = await readWorkbook(source);
+    const notes = workbook.getWorksheet('作品列表');
+    const exportNotes = String(notes?.getCell('I2').value);
+
+    expect(notes?.getCell('B2').text).toHaveLength(32_767);
+    expect(exportNotes).toContain('标题超过 Excel 单元格限制，已截断');
+    expect(exportNotes).toContain('作品 ID超过 Excel 单元格限制，已截断');
+    expect(exportNotes).toContain('作品链接超过 Excel 单元格限制，已截断');
+    expect(exportNotes).toContain('作品链接不是安全 HTTPS 地址，已作为文本导出');
+    expect(exportNotes).toContain('封面链接超过 Excel 单元格限制，已截断');
+    expect(exportNotes).toContain('封面链接不是安全 HTTPS 地址，已作为文本导出');
+    expect(note).toEqual(original);
+  });
+
+  it('retains generated warnings when an input export note consumes the cell budget', async () => {
+    const source = result({ notes: [result().notes[0]!] });
+    source.notes[0]!.title = 't'.repeat(32_768);
+    source.notes[0]!.exportNotes = ['n'.repeat(32_768)];
+
+    const workbook = await readWorkbook(source);
+    const exportNotes = String(workbook.getWorksheet('作品列表')?.getCell('I2').value);
+
+    expect(exportNotes).toContain('标题超过 Excel 单元格限制，已截断');
+    expect(exportNotes).toContain('导出备注超过 Excel 单元格限制，已截断');
+  });
+
+  it('accepts exactly 10,000 structural note slots but rejects larger exports before writing', async () => {
+    const exported = (await import('../src/export/workbook')) as unknown as { MAX_EXPORT_NOTES: number };
+    expect(exported.MAX_EXPORT_NOTES).toBe(10_000);
+    const writeBuffer = vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3]));
+    const restore = vi.spyOn(ExcelJS.Workbook.prototype, 'xlsx', 'get').mockReturnValue({ writeBuffer } as never);
+
+    try {
+      await expect(buildWorkbookBuffer(result({ notes: new Array(10_000) as CollectionResult['notes'] }))).resolves.toBeInstanceOf(Uint8Array);
+      await expect(buildWorkbookBuffer(result({ notes: new Array(10_001) as CollectionResult['notes'] })))
+        .rejects.toThrow('作品数量超过导出上限 10000，无法生成 Excel');
+      expect(writeBuffer).toHaveBeenCalledOnce();
+    } finally {
+      restore.mockRestore();
+    }
+  });
 });
 
 describe('makeWorkbookFilename', () => {
