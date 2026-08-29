@@ -18,20 +18,21 @@ const knownActions: readonly ActionName[] = ['start', 'stop', 'retry', 'exportPa
 
 const styles = `
   :host {
-    position: fixed;
-    right: 20px;
-    bottom: 20px;
-    z-index: 2147483647;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    all: initial;
   }
   .panel {
-    width: 240px;
-    padding: 16px;
+    position: fixed;
+    right: 24px;
+    bottom: 24px;
+    z-index: 2147483647;
+    width: 176px;
+    padding: 12px;
     color: #fff1f4;
     background: #211217;
     border: 1px solid #77354a;
     border-radius: 14px;
     box-shadow: 0 12px 35px rgb(0 0 0 / 35%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
   .title { font-size: 14px; font-weight: 700; }
   .detail { margin-top: 6px; color: #e8b9c5; font-size: 13px; }
@@ -91,7 +92,6 @@ export class FloatingControl {
 
     switch (state.phase) {
       case 'ready':
-        this.addText(status, '采集此博主', 'title');
         this.addActions(panel, [['start', '采集此博主']]);
         break;
       case 'collecting': {
@@ -110,7 +110,7 @@ export class FloatingControl {
       case 'paused':
       case 'failed': {
         const count = validCount(state.count);
-        this.addText(status, state.phase === 'paused' ? '已暂停' : '采集失败', 'title');
+        this.addText(status, state.phase === 'paused' ? '采集已暂停' : '采集失败', 'title');
         this.addText(status, state.message, 'detail');
         this.addText(status, `已发现 ${count} 篇`, 'detail');
         this.addActions(panel, [['retry', '重试'], ['exportPartial', '导出已有数据']]);
