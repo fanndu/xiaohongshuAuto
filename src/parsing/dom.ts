@@ -31,19 +31,28 @@ function srcsetCandidates(srcset: string): string[] {
   const candidates: string[] = [];
   let index = 0;
   while (index < srcset.length) {
-    while (index < srcset.length && /[\s,]/.test(srcset[index] ?? '')) index += 1;
+    while (index < srcset.length && /[\t\n\f\r ,]/.test(srcset[index] ?? '')) index += 1;
     if (index >= srcset.length) break;
 
     const start = index;
-    const isDataUrl = srcset.slice(index, index + 5).toLowerCase() === 'data:';
-    while (index < srcset.length && (isDataUrl
-      ? !/\s/.test(srcset[index] ?? '')
-      : !/[\s,]/.test(srcset[index] ?? ''))) index += 1;
-    const candidate = srcset.slice(start, index);
+    while (index < srcset.length && !/[\t\n\f\r ]/.test(srcset[index] ?? '')) index += 1;
+    const collected = srcset.slice(start, index);
+    const candidate = collected.replace(/,+$/, '');
     if (candidate) candidates.push(candidate);
 
-    while (index < srcset.length && srcset[index] !== ',') index += 1;
-    if (srcset[index] === ',') index += 1;
+    if (candidate !== collected) continue;
+
+    let parentheses = 0;
+    while (index < srcset.length) {
+      const char = srcset[index] ?? '';
+      if (char === '(') parentheses += 1;
+      else if (char === ')' && parentheses > 0) parentheses -= 1;
+      else if (char === ',' && parentheses === 0) {
+        index += 1;
+        break;
+      }
+      index += 1;
+    }
   }
   return candidates;
 }
@@ -113,13 +122,14 @@ function noteCards(doc: Document): Element[] {
   return [...doc.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')];
 }
 
-function noteLink(card: Element, base: string): { id: string; noteUrl: string } | null {
+function noteLinks(card: Element, base: string): Array<{ id: string; noteUrl: string }> {
+  const links: Array<{ id: string; noteUrl: string }> = [];
   for (const anchor of card.querySelectorAll('a[href*="/explore/"], a[href*="/discovery/item/"]')) {
     const noteUrl = normalizeNoteUrl(anchor.getAttribute('href'), base);
     const id = extractNoteId(noteUrl);
-    if (noteUrl && id) return { id, noteUrl };
+    if (noteUrl && id) links.push({ id, noteUrl });
   }
-  return null;
+  return links;
 }
 
 function likesRaw(card: Element): string {
@@ -135,7 +145,9 @@ function likesRaw(card: Element): string {
 }
 
 function mapNote(card: Element, base: string): NoteRecord | null {
-  const link = noteLink(card, base);
+  const links = noteLinks(card, base);
+  if (new Set(links.map(link => link.id)).size !== 1) return null;
+  const link = links[0];
   if (!link) return null;
 
   const videoMarker = card.querySelector([
@@ -156,13 +168,15 @@ function mapNote(card: Element, base: string): NoteRecord | null {
 }
 
 function mergeDuplicateNote(existing: NoteRecord, later: NoteRecord): NoteRecord {
-  // DOM order makes nested child cards later and therefore more specific on conflicts.
+  // Later child cards win title/likes/cover conflicts, while video evidence is monotonic.
   return {
     ...existing,
     id: later.id || existing.id,
     noteUrl: later.noteUrl || existing.noteUrl,
     title: later.title || existing.title,
-    type: later.type === 'unknown' ? existing.type : later.type,
+    type: existing.type === 'video' || later.type === 'video'
+      ? 'video'
+      : later.type === 'unknown' ? existing.type : later.type,
     likes: later.likes.raw ? later.likes : existing.likes,
     coverUrl: later.coverUrl || existing.coverUrl,
     exportNotes: [...new Set([...existing.exportNotes, ...later.exportNotes])],

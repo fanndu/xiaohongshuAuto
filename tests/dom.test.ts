@@ -246,6 +246,40 @@ describe('parseDomPage', () => {
     expect(parseDomPage(document, profileUrl).notes).toHaveLength(2);
   });
 
+  it('does not let a multi-note ancestor leak one sibling cover or likes into another', () => {
+    document.body.innerHTML = `
+      <div class="note-item-list">
+        <article class="note-item">
+          <a href="/explore/one"><span class="title">作品一</span></a>
+        </article>
+        <article class="note-item">
+          <a href="/explore/two"><span class="title">作品二</span></a>
+          <a class="cover"><img src="https://img.example/two.jpg"></a>
+          <span class="like-count">22</span>
+        </article>
+      </div>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([
+      { id: 'one', title: '作品一', coverUrl: '', likes: { raw: '', value: null } },
+      { id: 'two', title: '作品二', coverUrl: 'https://img.example/two.jpg', likes: { raw: '22', value: 22 } },
+    ]);
+  });
+
+  it('retains video evidence from an enclosing duplicate when the child has no marker', () => {
+    document.body.innerHTML = `
+      <div class="note-item-wrapper"><span class="video-icon"></span>
+        <article class="note-item"><a href="/explore/video-evidence"><span class="title">子卡片标题</span></a></article>
+      </div>
+    `;
+
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([{
+      id: 'video-evidence',
+      title: '子卡片标题',
+      type: 'video',
+    }]);
+  });
+
   it('tokenizes data srcsets without treating rejected fragments as relative URLs', () => {
     document.body.innerHTML = `
       <section class="user">
@@ -267,6 +301,23 @@ describe('parseDomPage', () => {
         { id: 'data-only', coverUrl: '' },
         { id: 'lazy-srcset', coverUrl: 'https://img.example/lazy-srcset.jpg' },
       ],
+    });
+  });
+
+  it('keeps comma-bearing image URLs whole and advances past descriptorless data URLs', () => {
+    document.body.innerHTML = `
+      <section class="user">
+        <img class="user-avatar" src="javascript:alert(1)" srcset="https://img.example/c_fill,w_300/photo.jpg 1x">
+      </section>
+      <article class="note-item">
+        <a href="/explore/descriptorless-data"></a>
+        <a class="cover"><img src="javascript:alert(1)" srcset="data:image/svg+xml,%3Csvg%3E, https://img.example/real.jpg 2x"></a>
+      </article>
+    `;
+
+    expect(parseDomPage(document, profileUrl)).toMatchObject({
+      profile: { avatarUrl: 'https://img.example/c_fill,w_300/photo.jpg' },
+      notes: [{ id: 'descriptorless-data', coverUrl: 'https://img.example/real.jpg' }],
     });
   });
 
