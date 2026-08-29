@@ -155,6 +155,27 @@ describe('buildWorkbookBuffer', () => {
     expect(profile?.getCell('B16').value).toContain('IP 属地超过 Excel 单元格限制，已截断');
   });
 
+  it('applies the cell limit before OOXML escaping decoded text', async () => {
+    const literalEscapes = '_x0041_'.repeat(4_681);
+    const carriageReturns = '\r'.repeat(32_767);
+    const loneSurrogates = '\uD800'.repeat(32_767);
+    const source = result();
+    source.profile.accountName = literalEscapes;
+    source.profile.description = carriageReturns;
+    source.profile.ipLocation = loneSurrogates;
+
+    const workbook = await readWorkbook(source);
+    const profile = workbook.getWorksheet('博主信息');
+    const exportNotes = String(profile?.getCell('B16').value);
+
+    expect(profile?.getCell('B3').value).toBe(literalEscapes);
+    expect(profile?.getCell('B6').value).toBe(carriageReturns);
+    expect(profile?.getCell('B7').value).toBe(loneSurrogates);
+    expect(exportNotes).not.toContain('账号名超过 Excel 单元格限制，已截断');
+    expect(exportNotes).not.toContain('简介超过 Excel 单元格限制，已截断');
+    expect(exportNotes).not.toContain('IP 属地超过 Excel 单元格限制，已截断');
+  });
+
   it('keeps unsafe link fields as normalized text and records field-specific warnings', async () => {
     const source = result();
     source.profile.profileUrl = ' javascript:alert(1) ';

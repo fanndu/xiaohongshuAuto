@@ -15,21 +15,34 @@ function ooxmlEscape(codeUnit: number): string {
   return `_x${codeUnit.toString(16).toUpperCase().padStart(4, '0')}_`;
 }
 
-function normalizeCellText(input: string, maxLength = MAX_CELL_TEXT_LENGTH): NormalizedText {
-  let text = '';
-  let truncated = false;
+function truncateUtf16(input: string, maxLength: number): NormalizedText {
+  if (input.length <= maxLength) return { text: input, truncated: false };
 
-  for (let index = 0; index < input.length;) {
-    const codeUnit = input.charCodeAt(index);
+  let end = maxLength;
+  const finalCodeUnit = input.charCodeAt(end - 1);
+  const nextCodeUnit = input.charCodeAt(end);
+  if (finalCodeUnit >= 0xD800 && finalCodeUnit <= 0xDBFF
+    && nextCodeUnit >= 0xDC00 && nextCodeUnit <= 0xDFFF) {
+    end -= 1;
+  }
+  return { text: input.slice(0, end), truncated: true };
+}
+
+function normalizeCellText(input: string, maxLength = MAX_CELL_TEXT_LENGTH): NormalizedText {
+  const retained = truncateUtf16(input, maxLength);
+  let text = '';
+
+  for (let index = 0; index < retained.text.length;) {
+    const codeUnit = retained.text.charCodeAt(index);
     let chunk: string;
 
-    if (input.slice(index, index + 7).match(/^_x[0-9a-fA-F]{4}_$/)) {
-      chunk = `_x005F_${input.slice(index + 1, index + 7)}`;
+    if (retained.text.slice(index, index + 7).match(/^_x[0-9a-fA-F]{4}_$/)) {
+      chunk = `_x005F_${retained.text.slice(index + 1, index + 7)}`;
       index += 7;
     } else if (codeUnit >= 0xD800 && codeUnit <= 0xDBFF) {
-      const next = input.charCodeAt(index + 1);
+      const next = retained.text.charCodeAt(index + 1);
       if (next >= 0xDC00 && next <= 0xDFFF) {
-        chunk = input.slice(index, index + 2);
+        chunk = retained.text.slice(index, index + 2);
         index += 2;
       } else {
         chunk = ooxmlEscape(codeUnit);
@@ -46,18 +59,13 @@ function normalizeCellText(input: string, maxLength = MAX_CELL_TEXT_LENGTH): Nor
       chunk = ooxmlEscape(codeUnit);
       index += 1;
     } else {
-      chunk = input[index] ?? '';
+      chunk = retained.text[index] ?? '';
       index += 1;
-    }
-
-    if (text.length + chunk.length > maxLength) {
-      truncated = true;
-      break;
     }
     text += chunk;
   }
 
-  return { text, truncated };
+  return { text, truncated: retained.truncated };
 }
 
 function uniqueNotes(notes: string[]): string[] {
