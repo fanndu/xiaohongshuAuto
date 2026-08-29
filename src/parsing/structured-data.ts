@@ -430,7 +430,8 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
   const siblingNotes = own(page, 'notes');
   const parentIdentity = string(own(page, 'userId'));
   const selectedNotes = pageNotesExplicit && supportedNotesContainer(pageNotes) ? pageNotes
-    : !pageNotesExplicit && (!userId || parentIdentity === userId) && supportedNotesContainer(siblingNotes) ? siblingNotes
+    : !pageNotesExplicit && Boolean(userId) && Boolean(parentIdentity) && parentIdentity === userId
+      && supportedNotesContainer(siblingNotes) ? siblingNotes
       : undefined;
   const mappedNotes = identityStatus !== 'conflict' && identityStatus !== 'budget_exhausted' && selectedNotes !== undefined
     ? flattenNotes(selectedNotes).map(note => safelyMapNote(note, userId)) : [];

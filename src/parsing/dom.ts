@@ -132,6 +132,14 @@ function statRaw(scope: ParentNode, label: string): string {
 }
 
 const WORKS_SELECTOR = '[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page';
+const PROFILE_ROOT_SELECTORS = [
+  '[data-testid="profile-page"]',
+  '[data-testid="profile-scope"]',
+  '.profile-page',
+  '[data-testid="profile-header"]',
+  'section.user',
+  '.user-info',
+];
 
 function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const values = new Set<string>();
@@ -151,13 +159,19 @@ function elementIdentity(element: Element, base: string): { userId: string; iden
   return { userId: [...values][0] ?? '', identityStatus: 'valid' };
 }
 
+interface BoundWorksContainer {
+  container: Element;
+  /** The profile scope that proved this works container belongs to the current header. */
+  scope: Element;
+}
+
 /** Select only a works area bound by the current header root or by its own explicit identity. */
-function worksContainer(doc: Document, root: Element | null, userId: string, base: string): Element | null {
+function worksContainer(doc: Document, root: Element | null, userId: string, base: string): BoundWorksContainer | null {
   if (!root || !userId) return null;
   for (const candidate of root.querySelectorAll(WORKS_SELECTOR)) {
     const identity = elementIdentity(candidate, base);
     if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
-    return candidate;
+    return { container: candidate, scope: root };
   }
   // A recognized narrow profile page may bind a sibling header and works panel together.
   const scope = root.closest('[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page');
@@ -165,13 +179,13 @@ function worksContainer(doc: Document, root: Element | null, userId: string, bas
     for (const candidate of scope.querySelectorAll(WORKS_SELECTOR)) {
       const identity = elementIdentity(candidate, base);
       if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
-      return candidate;
+      return { container: candidate, scope };
     }
   }
   // Global content must carry its own explicit current identity; never take the first feed.
   for (const candidate of doc.querySelectorAll(WORKS_SELECTOR)) {
     const identity = elementIdentity(candidate, base);
-    if (identity.identityStatus === 'valid' && identity.userId === userId) return candidate;
+    if (identity.identityStatus === 'valid' && identity.userId === userId) return { container: candidate, scope: root };
   }
   return null;
 }
@@ -275,12 +289,20 @@ function uniqueNotes(cards: Element[], base: string): NoteRecord[] {
   return notes;
 }
 
-function profileRootElement(doc: Document): Element | null {
-  for (const selector of ['[data-testid="profile-header"]', 'section.user', '.user-info']) {
-    const root = doc.querySelector(selector);
-    if (root) return root;
+function profileRootElement(doc: Document, base: string): { root: Element | null; identity: { userId: string; identityStatus: PageIdentityStatus } } {
+  const expected = canonicalProfileRoute(base)?.key ?? '';
+  const seen = new Set<Element>();
+  let fallback: { root: Element; identity: { userId: string; identityStatus: PageIdentityStatus } } | null = null;
+  for (const selector of PROFILE_ROOT_SELECTORS) {
+    for (const root of doc.querySelectorAll(selector)) {
+      if (seen.has(root)) continue;
+      seen.add(root);
+      const identity = elementIdentity(root, base);
+      if (expected && identity.identityStatus === 'valid' && identity.userId === expected) return { root, identity };
+      if (!fallback) fallback = { root, identity };
+    }
   }
-  return null;
+  return fallback ?? { root: null, identity: { userId: '', identityStatus: 'missing' } };
 }
 
 /** A DOM fallback is safe only when it looks like a real profile, not a generic page fragment. */
@@ -289,25 +311,44 @@ export function isRecognizedDomProfile(doc: Document): boolean {
   return page.identityStatus === 'valid' && page.hasProfileEvidence && page.hasWorksContainer;
 }
 
-function domIdentity(doc: Document, base: string): { userId: string; identityStatus: PageIdentityStatus } {
-  const root = profileRootElement(doc);
-  if (!root) return { userId: '', identityStatus: 'missing' };
-  return elementIdentity(root, base);
+function hasStats(scope: ParentNode): boolean {
+  return scope.querySelector('.data-info .data-item, [data-testid="profile-stat"]') !== null;
+}
+
+/** Prefer a current header's stats over wider scope stats when both are available. */
+function currentStatsScope(
+  scope: Element | null,
+  userId: string,
+  base: string,
+): Element | null {
+  if (!scope) return null;
+  const candidates = [scope, ...PROFILE_ROOT_SELECTORS.flatMap(selector => [...scope.querySelectorAll(selector)])];
+  for (const candidate of candidates) {
+    if (!hasStats(candidate)) continue;
+    const identity = elementIdentity(candidate, base);
+    if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
+    return candidate;
+  }
+  return null;
 }
 
 export function parseDomPage(
   doc: Document,
   profileUrl: string,
 ): DomPageResult {
-  const rootElement = profileRootElement(doc);
+  const selectedRoot = profileRootElement(doc, profileUrl);
+  const rootElement = selectedRoot.root;
   const root = rootElement ?? doc;
-  const identity = domIdentity(doc, profileUrl);
-  const currentWorks = identity.identityStatus === 'valid'
+  const identity = selectedRoot.identity;
+  const currentWorks = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key
     ? worksContainer(doc, rootElement, identity.userId, profileUrl)
     // Diagnostics retain parser output for incomplete pages; the mount gate never treats
     // a missing/conflicting-identity DOM source as usable.
-    : doc.querySelector(WORKS_SELECTOR);
-  const noteScope = currentWorks ?? (identity.identityStatus === 'valid' ? null : doc);
+    : null;
+  const diagnosticWorks = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc.querySelector(WORKS_SELECTOR));
+  const noteScope = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc);
+  const statScope = currentStatsScope(rootElement, identity.userId, profileUrl)
+    ?? currentWorks?.scope ?? rootElement ?? doc;
   const rawRedId = firstText(root, [
     '[data-testid="user-redId"]',
     '[data-testid="user-red-id"]',
@@ -351,15 +392,15 @@ export function parseDomPage(
       '[class*="user-desc"]',
     ]),
     ipLocation: stripLabel(rawIpLocation, 'IP属地'),
-    following: parseCount(statRaw(rootElement ?? doc, '关注')),
-    followers: parseCount(statRaw(rootElement ?? doc, '粉丝')),
-    likedAndCollected: parseCount(statRaw(rootElement ?? doc, '获赞与收藏')),
+    following: parseCount(statRaw(statScope, '关注')),
+    followers: parseCount(statRaw(statScope, '粉丝')),
+    likedAndCollected: parseCount(statRaw(statScope, '获赞与收藏')),
     exportNotes: [],
   };
   return {
     ...identity,
     hasProfileEvidence: Boolean(profile.accountName || profile.redId || profile.avatarUrl),
-    hasWorksContainer: currentWorks !== null,
+    hasWorksContainer: diagnosticWorks !== null,
     profile,
     notes: uniqueNotes(noteCards(noteScope), profileUrl),
   };

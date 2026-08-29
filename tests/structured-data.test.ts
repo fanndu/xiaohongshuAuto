@@ -532,6 +532,16 @@ describe('parseStructuredPage', () => {
     expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({ identityStatus: 'conflict', notes: [] });
   });
 
+  it('never uses sibling notes without an explicit matching parent identity', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
+      userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [] },
+      notes: [{ noteCard: { id: 'stale-alice', userId: 'alice' } }],
+    } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', identityStatus: 'valid', hasNotesContainer: false, notes: [],
+    });
+  });
+
   it('unwraps bounded reactive maps, preserves wrapper identities, and reads current cover variants', () => {
     const reactive = {
       user: {

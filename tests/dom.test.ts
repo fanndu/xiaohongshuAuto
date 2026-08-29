@@ -4,19 +4,20 @@ import { describe, expect, it } from 'vitest';
 import { parseDomPage } from '../src/parsing/dom';
 
 const profileUrl = 'https://www.xiaohongshu.com/user/profile/u1';
+const fixtureProfileUrl = 'https://www.xiaohongshu.com/user/profile/azhe';
 const fixture = readFileSync(resolve(process.cwd(), 'tests/fixtures/profile-page.html'), 'utf8');
 
 describe('parseDomPage', () => {
   it('extracts a complete profile and video note from the page fixture', () => {
     document.body.innerHTML = fixture;
 
-    expect(parseDomPage(document, profileUrl)).toEqual({
+    expect(parseDomPage(document, fixtureProfileUrl)).toEqual({
       userId: 'azhe',
       identityStatus: 'valid',
       hasProfileEvidence: true,
       hasWorksContainer: true,
       profile: {
-        profileUrl,
+        profileUrl: fixtureProfileUrl,
         accountName: '旅行摄影阿哲',
         redId: 'xhs_azhe',
         avatarUrl: 'https://img.example/avatar.jpg',
@@ -137,7 +138,7 @@ describe('parseDomPage', () => {
       </article>
     `;
 
-    expect(parseDomPage(document, profileUrl)).toMatchObject({
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/alice')).toMatchObject({
       profile: {
         following: { raw: '7', value: 7 },
         followers: { raw: '8', value: 8 },
@@ -368,7 +369,7 @@ describe('parseDomPage', () => {
     document.body.innerHTML = `
       <section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"></section></section>
     `;
-    expect(parseDomPage(document, profileUrl)).toMatchObject({
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/alice')).toMatchObject({
       userId: 'alice', identityStatus: 'valid', hasProfileEvidence: true, hasWorksContainer: true,
     });
 
@@ -410,6 +411,38 @@ describe('parseDomPage', () => {
     expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
       userId: 'bob', hasWorksContainer: true,
       profile: { following: { raw: '7', value: 7 } }, notes: [{ id: 'bob-note' }],
+    });
+  });
+
+  it('selects a later current root instead of letting an earlier stale root block Bob', () => {
+    document.body.innerHTML = `
+      <section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"><article class="note-item"><a href="/explore/alice-note"></a></article></section></section>
+      <section class="user" data-user-id="bob"><a href="/user/profile/bob">Bob</a><span class="user-name">Bob</span><section class="feeds-page"><article class="note-item"><a href="/explore/bob-note"></a></article></section></section>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', identityStatus: 'valid', profile: { accountName: 'Bob' }, notes: [{ id: 'bob-note' }],
+    });
+  });
+
+  it('uses the validated profile scope for sibling current stats and works', () => {
+    document.body.innerHTML = `
+      <div class="data-info"><div class="data-item"><span>关注</span><strong>999</strong></div></div>
+      <section class="feeds-page" data-user-id="alice"><article class="note-item"><a href="/explore/alice-note"></a></article></section>
+      <main class="profile-page" data-user-id="bob">
+        <section data-testid="profile-header"><span class="user-name">Bob</span></section>
+        <div class="data-info">
+          <div class="data-item"><span>关注</span><strong>7</strong></div>
+          <div class="data-item"><span>粉丝</span><strong>8</strong></div>
+          <div class="data-item"><span>获赞与收藏</span><strong>9</strong></div>
+        </div>
+        <section class="feeds-page"><article class="note-item"><a href="/explore/bob-scope-note"></a></article></section>
+      </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', identityStatus: 'valid',
+      profile: {
+        accountName: 'Bob', following: { raw: '7', value: 7 }, followers: { raw: '8', value: 8 },
+        likedAndCollected: { raw: '9', value: 9 },
+      },
+      notes: [{ id: 'bob-scope-note' }],
     });
   });
 });
