@@ -129,11 +129,9 @@ function lastStateFromScript(source: string): unknown {
       }
     }
 
-    const children = childNodes(node);
-    for (let index = children.length - 1; index >= 0; index -= 1) {
-      const child = children[index];
-      if (child) pending.push(child);
-    }
+    const children = childNodes(node).sort((left, right) => left.start - right.start || left.end - right.end);
+    // Pushing source-order children makes the stack pop the latest source node first.
+    for (const child of children) pending.push(child);
   }
   return latest?.state ?? null;
 }

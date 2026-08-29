@@ -405,4 +405,16 @@ describe('parseStructuredPage', () => {
 
     expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('Unicode除法后状态');
   });
+
+  it('finds a late state assignment within the AST visit budget', () => {
+    const valid = {
+      user: { userPageData: { basicInfo: { nickname: '末尾状态' }, interactions: [], notes: [] } },
+    };
+    const precedingStatements = 'a;'.repeat(50_100);
+    document.body.innerHTML = `<script>${precedingStatements}
+      window.__INITIAL_STATE__ = ${JSON.stringify(valid)};
+    </script>`;
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('末尾状态');
+  });
 });
