@@ -486,12 +486,48 @@ describe('parseDomPage', () => {
 
   it('does not accept ambiguous unbound headers inside a bound profile scope', () => {
     document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
-      <section data-testid="profile-header"><span class="user-name">Maybe Alice</span></section>
-      <section data-testid="profile-header"><span class="user-name">Maybe Bob</span></section>
+      <section data-testid="profile-header"><span class="user-name">Maybe Alice</span><div class="data-info"><div class="data-item"><span>关注</span><strong>99</strong></div></div></section>
+      <section data-testid="profile-header"><span class="user-name">Maybe Bob</span><div class="data-info"><div class="data-item"><span>关注</span><strong>88</strong></div></div></section>
+      <section class="feeds-page" data-user-id="bob"><article class="note-item"><a href="/explore/not-usable"></a></article></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', hasProfileEvidence: false, hasWorksContainer: false, notes: [],
+      profile: { accountName: '', following: { raw: '', value: null } },
+    });
+  });
+
+  it('rejects an exact Bob header nested inside an explicitly Alice-bound profile scope', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="alice">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <div class="data-info"><div class="data-item"><span>关注</span><strong>99</strong></div></div>
+      <section class="feeds-page"><article class="note-item"><a href="/explore/alice-stale"></a></article></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasProfileEvidence: false, hasWorksContainer: false, notes: [],
+      profile: { accountName: '', following: { raw: '', value: null } },
+    });
+  });
+
+  it('uses only direct sibling scope stats when a current header lacks stats', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header"><span class="user-name">Alice stale</span><div class="data-info"><div class="data-item"><span>关注</span><strong>99</strong></div></div></section>
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <div class="data-info"><div class="data-item"><span>关注</span><strong>7</strong></div></div>
       <section class="feeds-page" data-user-id="bob"></section>
     </main>`;
     expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
-      userId: 'bob', hasProfileEvidence: false, profile: { accountName: '' },
+      profile: { accountName: 'Bob', following: { raw: '7', value: 7 } },
+    });
+  });
+
+  it('does not use stale header stats when a current header has no direct sibling stats', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header"><span class="user-name">Alice stale</span><div class="data-info"><div class="data-item"><span>关注</span><strong>99</strong></div></div></section>
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <section class="feeds-page" data-user-id="bob"></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      profile: { following: { raw: '', value: null } },
     });
   });
 });

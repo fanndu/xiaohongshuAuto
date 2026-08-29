@@ -114,9 +114,10 @@ function labelElement(item: Element, label: string): Element | null {
   return null;
 }
 
-function statRaw(scope: ParentNode, label: string): string {
+function statRaw(scope: ParentNode, label: string, directScopeOnly = false): string {
   const items = scope.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]');
   for (const item of items) {
+    if (directScopeOnly && item.closest(PROFILE_HEADER_SELECTORS.join(','))) continue;
     const semanticLabel = labelElement(item, label);
     if (!semanticLabel) continue;
     const count = usableCount(item, [
@@ -191,13 +192,17 @@ function splitCurrentCandidates(candidates: readonly Element[], userId: string, 
   return { exact, unbound };
 }
 
-function validatedProfileScope(root: Element | null): Element | null {
-  return root?.closest(PROFILE_SCOPE_SELECTOR) ?? root;
+function validatedProfileScope(root: Element | null, userId: string, base: string): Element | null {
+  const scope = root?.closest(PROFILE_SCOPE_SELECTOR) ?? root;
+  if (!scope) return null;
+  const identity = elementIdentity(scope, base);
+  if (identity.identityStatus === 'conflict') return null;
+  if (identity.identityStatus === 'valid' && identity.userId !== userId) return null;
+  return scope;
 }
 
 /** Select only a works area bound by the current header root or by its own explicit identity. */
-function worksContainer(doc: Document, root: Element | null, userId: string, base: string): BoundWorksContainer | null {
-  const scope = validatedProfileScope(root);
+function worksContainer(doc: Document, scope: Element | null, userId: string, base: string): BoundWorksContainer | null {
   if (!scope || !userId) return null;
   const scoped = splitCurrentCandidates(selectorCandidates(scope, [WORKS_SELECTOR]), userId, base);
   if (scoped.exact[0]) return { container: scoped.exact[0], scope };
@@ -352,17 +357,22 @@ export function parseDomPage(
   const selectedRoot = profileRootElement(doc, profileUrl);
   const rootElement = selectedRoot.root;
   const identity = selectedRoot.identity;
-  const scope = validatedProfileScope(rootElement);
-  const header = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key
+  const routeCurrent = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key;
+  const scope = routeCurrent ? validatedProfileScope(rootElement, identity.userId, profileUrl) : null;
+  const header = scope
     ? currentHeader(scope, identity.userId, profileUrl) : null;
-  const currentWorks = identity.identityStatus === 'valid' && identity.userId === canonicalProfileRoute(profileUrl)?.key
-    ? worksContainer(doc, rootElement, identity.userId, profileUrl)
+  // A route-current source is usable only after both its enclosing scope and one header are unambiguous.
+  const domUsable = Boolean(scope && header);
+  const currentWorks = domUsable
+    ? worksContainer(doc, scope, identity.userId, profileUrl)
     // Diagnostics retain parser output for incomplete pages; the mount gate never treats
     // a missing/conflicting-identity DOM source as usable.
     : null;
-  const diagnosticWorks = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc.querySelector(WORKS_SELECTOR));
-  const noteScope = currentWorks?.container ?? (identity.identityStatus === 'valid' ? null : doc);
-  const statScope = header && hasStats(header) ? header : currentWorks?.scope ?? scope ?? doc;
+  const diagnosticWorks = currentWorks?.container ?? (routeCurrent ? null : doc.querySelector(WORKS_SELECTOR));
+  const noteScope = currentWorks?.container ?? (routeCurrent ? null : doc);
+  const useHeaderStats = Boolean(header && hasStats(header));
+  const statScope = domUsable ? (useHeaderStats ? header : currentWorks?.scope ?? scope)
+    : !routeCurrent ? rootElement ?? doc : null;
   // Missing/conflicting identity is never mountable, but legacy callers may still inspect diagnostics.
   const fieldRoot = header ?? (identity.identityStatus === 'valid' ? null : rootElement ?? doc);
   const rawRedId = fieldRoot ? firstText(fieldRoot, [
@@ -408,9 +418,9 @@ export function parseDomPage(
       '[class*="user-desc"]',
     ]) : '',
     ipLocation: stripLabel(rawIpLocation, 'IP属地'),
-    following: parseCount(statRaw(statScope, '关注')),
-    followers: parseCount(statRaw(statScope, '粉丝')),
-    likedAndCollected: parseCount(statRaw(statScope, '获赞与收藏')),
+    following: parseCount(statScope ? statRaw(statScope, '关注', domUsable && !useHeaderStats) : ''),
+    followers: parseCount(statScope ? statRaw(statScope, '粉丝', domUsable && !useHeaderStats) : ''),
+    likedAndCollected: parseCount(statScope ? statRaw(statScope, '获赞与收藏', domUsable && !useHeaderStats) : ''),
     exportNotes: [],
   };
   return {
