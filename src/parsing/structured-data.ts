@@ -6,7 +6,8 @@ type LexicalMode = 'code' | 'single-quote' | 'double-quote' | 'template' | 'line
 
 const MAX_SCRIPT_CHARS = 5_000_000;
 const MAX_NOTE_DEPTH = 64;
-const MAX_NOTE_ITEMS = 10_000;
+const MAX_NOTE_VISITS = 10_000;
+const MAX_NOTE_RECORDS = 10_000;
 
 export interface StructuredPageResult {
   profile: Partial<ProfileRecord> | null;
@@ -17,6 +18,10 @@ const record = (value: unknown): JsonRecord | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
 
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+
+function hasUserPageData(value: unknown): boolean {
+  return record(record(record(value)?.user)?.userPageData) !== null;
+}
 
 function firstString(...values: unknown[]): string {
   for (const value of values) {
@@ -95,6 +100,7 @@ function replaceUndefinedPropertyValues(source: string): string {
 
 function readInitialState(doc: Document): unknown {
   const marker = 'window.__INITIAL_STATE__';
+  let latestState: unknown = null;
   for (const script of doc.querySelectorAll('script')) {
     const text = script.textContent ?? '';
     if (text.length > MAX_SCRIPT_CHARS) continue;
@@ -153,13 +159,14 @@ function readInitialState(doc: Document): unknown {
       const source = assignedJson(text, equalsIndex + 1);
       if (!source) continue;
       try {
-        return JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
+        const candidate = JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
+        if (hasUserPageData(candidate)) latestState = candidate;
       } catch {
         // A later assignment can still be valid, so keep scanning this and later scripts.
       }
     }
   }
-  return null;
+  return latestState;
 }
 
 function flattenNotes(value: unknown): unknown[] {
@@ -169,7 +176,9 @@ function flattenNotes(value: unknown): unknown[] {
   const pending: Array<{ values: unknown[]; index: number; depth: number }> = [
     { values: value, index: 0, depth: 0 },
   ];
-  while (pending.length > 0 && flattened.length < MAX_NOTE_ITEMS) {
+  // The root note array is a visited node too, so it consumes one unit of work.
+  let visits = 1;
+  while (pending.length > 0 && visits < MAX_NOTE_VISITS && flattened.length < MAX_NOTE_RECORDS) {
     const current = pending[pending.length - 1];
     if (!current) break;
     if (current.depth >= MAX_NOTE_DEPTH || current.index >= current.values.length) {
@@ -178,6 +187,7 @@ function flattenNotes(value: unknown): unknown[] {
     }
     const child = current.values[current.index];
     current.index += 1;
+    visits += 1;
     if (Array.isArray(child)) pending.push({ values: child, index: 0, depth: current.depth + 1 });
     else flattened.push(child);
   }

@@ -268,16 +268,12 @@ describe('parseStructuredPage', () => {
     const oversized = JSON.stringify({
       user: { userPageData: { basicInfo: { nickname: '应跳过' }, interactions: [], notes: [] } },
     }) + ' '.repeat(5_000_001);
-    document.body.innerHTML = [
-      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(bounded)};</script>`,
-      `<script>window.__INITIAL_STATE__ = ${oversized};</script>`,
-      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(later)};</script>`,
-    ].join('');
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(bounded)};</script>`;
 
     const boundedResult = parseStructuredPage(document, location.href);
-    expect(boundedResult.notes).toHaveLength(10_000);
+    expect(boundedResult.notes).toHaveLength(9_999);
     expect(boundedResult.notes[0]?.id).toBe('item-0');
-    expect(boundedResult.notes[9_999]?.id).toBe('item-9999');
+    expect(boundedResult.notes[9_998]?.id).toBe('item-9998');
     document.body.innerHTML = [
       `<script>window.__INITIAL_STATE__ = ${oversized};</script>`,
       `<script>window.__INITIAL_STATE__ = ${JSON.stringify(later)};</script>`,
@@ -296,5 +292,47 @@ describe('parseStructuredPage', () => {
 
     expect(parseStructuredPage(document, location.href).profile?.accountName)
       .toBe('quote " } ] undefined');
+  });
+
+  it('skips placeholder assignments and retains the latest shape-valid state', () => {
+    const sameScript = {
+      user: { userPageData: { basicInfo: { nickname: '同脚本有效' }, interactions: [], notes: [] } },
+    };
+    const laterScript = {
+      user: { userPageData: { basicInfo: { nickname: '后脚本有效' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = {}; window.__INITIAL_STATE__ = ${JSON.stringify(sameScript)};</script>`,
+      `<script>window.__INITIAL_STATE__ = {}; window.__INITIAL_STATE__ = ${JSON.stringify(laterScript)};</script>`,
+      '<script>window.__INITIAL_STATE__ = {broken;</script>',
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('后脚本有效');
+  });
+
+  it('does not let a regex-literal marker win over a shape-valid assignment', () => {
+    const valid = {
+      user: { userPageData: { basicInfo: { nickname: '正则后有效' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      '<script>const matcher = /window.__INITIAL_STATE__ = {}/;',
+      `window.__INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('正则后有效');
+  });
+
+  it('counts nested arrays against the traversal visit budget', () => {
+    const notes = [
+      ...Array.from({ length: 9_999 }, () => []),
+      { id: 'after-visit-budget' },
+    ];
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '有界遍历' }, interactions: [], notes } },
+    })};</script>`;
+
+    const result = parseStructuredPage(document, location.href);
+    expect(result.profile?.accountName).toBe('有界遍历');
+    expect(result.notes).toEqual([]);
   });
 });
