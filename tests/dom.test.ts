@@ -606,4 +606,14 @@ describe('parseDomPage', () => {
     if (identity) expect(page).toMatchObject({ hasWorksContainer: true, notes: [{ id: 'live-feed' }] });
     else expect(page).toMatchObject({ hasWorksContainer: false, notes: [] });
   });
+
+  it('does not admit an unbound feed nested inside #userPostedFeeds', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <section id="userPostedFeeds"><section class="feeds-page"><article class="note-item"><a href="/explore/leaked-note"></a></article></section></section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasWorksContainer: false, notes: [],
+    });
+  });
 });
