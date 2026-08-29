@@ -72,8 +72,21 @@ export class NoteStore {
       const candidate = this.candidate(item);
       if (!candidate) continue;
 
-      const index = (candidate.id ? this.byId.get(candidate.id) : undefined)
-        ?? (candidate.noteUrl ? this.byUrl.get(candidate.noteUrl) : undefined);
+      const idIndex = candidate.id ? this.byId.get(candidate.id) : undefined;
+      const urlIndex = candidate.noteUrl ? this.byUrl.get(candidate.noteUrl) : undefined;
+      if (idIndex !== undefined && urlIndex !== undefined && idIndex !== urlIndex) {
+        const earliestIndex = Math.min(idIndex, urlIndex);
+        const laterIndex = Math.max(idIndex, urlIndex);
+        const earliest = this.records[earliestIndex];
+        const later = this.records[laterIndex];
+        if (!earliest || !later) continue;
+        this.records[earliestIndex] = this.merge(this.merge(earliest, later), candidate);
+        this.records.splice(laterIndex, 1);
+        this.rebuildIndexes();
+        continue;
+      }
+
+      const index = idIndex ?? urlIndex;
       if (index === undefined) {
         this.records.push(candidate);
         const newIndex = this.records.length - 1;
@@ -95,6 +108,7 @@ export class NoteStore {
     const noteUrl = normalizeNoteUrl(string(item.noteUrl));
     const explicitId = safeId(item.id);
     const urlId = safeId(extractNoteId(noteUrl));
+    if (explicitId && urlId && explicitId !== urlId) return null;
     const id = explicitId || urlId;
     if (!id && !noteUrl) return null;
 
@@ -112,6 +126,12 @@ export class NoteStore {
   private index(record: NoteRecord, index: number): void {
     if (record.id) this.byId.set(record.id, index);
     if (record.noteUrl) this.byUrl.set(record.noteUrl, index);
+  }
+
+  private rebuildIndexes(): void {
+    this.byId.clear();
+    this.byUrl.clear();
+    this.records.forEach((record, index) => this.index(record, index));
   }
 
   private merge(existing: NoteRecord, later: NoteRecord): NoteRecord {

@@ -45,6 +45,47 @@ describe('NoteStore', () => {
     }]);
   });
 
+  it('coalesces separately indexed ID and URL records when a bridge arrives', () => {
+    const store = new NoteStore();
+    store.addMany([
+      note({ id: 'bridge-id', title: 'earliest', exportNotes: ['ID evidence'] }),
+      note({ noteUrl: 'https://www.xiaohongshu.com/user/profile/bridge-url', coverUrl: 'https://img.example/cover.jpg' }),
+    ]);
+
+    expect(store.addMany([note({
+      id: 'bridge-id',
+      noteUrl: 'https://www.xiaohongshu.com/user/profile/bridge-url',
+      title: 'bridge title',
+      type: 'video',
+      exportNotes: ['bridge evidence'],
+    })])).toBe(0);
+    expect(store.values()).toEqual([note({
+      id: 'bridge-id',
+      noteUrl: 'https://www.xiaohongshu.com/user/profile/bridge-url',
+      title: 'bridge title',
+      type: 'video',
+      coverUrl: 'https://img.example/cover.jpg',
+      exportNotes: ['ID evidence', 'bridge evidence'],
+    })]);
+    expect(store.size).toBe(1);
+  });
+
+  it('rejects mismatched supplied IDs and URL IDs without poisoning stored records', () => {
+    const mismatched = note({
+      id: 'declared-id',
+      noteUrl: 'https://www.xiaohongshu.com/explore/url-id',
+      title: 'must not enter',
+    });
+    const sameBatch = new NoteStore();
+    expect(sameBatch.addMany([mismatched, note({ id: 'declared-id', title: 'valid' })])).toBe(1);
+    expect(sameBatch.values()).toEqual([note({ id: 'declared-id', title: 'valid' })]);
+
+    const crossCall = new NoteStore();
+    crossCall.addMany([note({ id: 'declared-id', title: 'existing' })]);
+    expect(crossCall.addMany([mismatched])).toBe(0);
+    expect(crossCall.values()).toEqual([note({ id: 'declared-id', title: 'existing' })]);
+  });
+
   it('deduplicates normalized query and hash URL variants when no note ID is available', () => {
     const store = new NoteStore();
 

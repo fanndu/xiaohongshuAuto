@@ -118,6 +118,57 @@ describe('collectUntilStable', () => {
     expect(env.scrolls).toBe(1);
   });
 
+  it('stops when a custom wait ignores its abort signal', async () => {
+    const controller = new AbortController();
+    let markWaitStarted: (() => void) | undefined;
+    const waitStarted = new Promise<void>(resolve => { markWaitStarted = resolve; });
+    const env = environment({
+      atBottom: () => false,
+      wait: () => {
+        markWaitStarted?.();
+        return new Promise<void>(() => {});
+      },
+    });
+    const pending = collectUntilStable({ environment: env, readNotes: () => [], signal: controller.signal });
+    await waitStarted;
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ reason: 'stopped', notes: [] });
+  });
+
+  it('passes its signal to reads and stops a never-resolving read on abort', async () => {
+    const controller = new AbortController();
+    const readNotes = vi.fn((signal: AbortSignal) => {
+      expect(signal).toBe(controller.signal);
+      return new Promise<NoteRecord[]>(() => {});
+    });
+    const pending = collectUntilStable({ environment: environment(), readNotes, signal: controller.signal });
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ reason: 'stopped', notes: [] });
+  });
+
+  it('awaits asynchronous progress and gives abort precedence over it', async () => {
+    const controller = new AbortController();
+    const env = environment();
+    let markProgressStarted: (() => void) | undefined;
+    const progressStarted = new Promise<void>(resolve => { markProgressStarted = resolve; });
+    const pending = collectUntilStable({
+      environment: env,
+      signal: controller.signal,
+      readNotes: () => [note('progress-note')],
+      onProgress: () => {
+        markProgressStarted?.();
+        return new Promise<void>(() => {});
+      },
+    });
+    await progressStarted;
+    controller.abort();
+
+    await expect(pending).resolves.toEqual({ reason: 'stopped', notes: [note('progress-note')] });
+    expect(env.scrolls).toBe(0);
+  });
+
   it('gives abort precedence when progress reporting aborts', async () => {
     const controller = new AbortController();
     const atBottom = vi.fn(() => true);
@@ -187,6 +238,37 @@ describe('collectUntilStable', () => {
   });
 
   it.each([
+    ['asynchronous read', (seed: NoteRecord) => ({
+      readNotes: () => Promise.reject(new Error('async read failed')),
+      seed: [seed],
+    })],
+    ['asynchronous progress', (seed: NoteRecord) => ({
+      readNotes: () => [],
+      onProgress: () => Promise.reject(new Error('async progress failed')),
+      seed: [seed],
+    })],
+    ['invalid read result', (seed: NoteRecord) => ({
+      readNotes: () => undefined as unknown as NoteRecord[],
+      seed: [seed],
+    })],
+  ] as const)('wraps a %s failure with its partial snapshot', async (_kind, optionsFor) => {
+    const seed = note('seed');
+
+    await expect(collectUntilStable({ environment: environment(), ...optionsFor(seed) }))
+      .rejects.toMatchObject({ code: 'LOAD_STALLED', notes: [seed] });
+  });
+
+  it('rechecks for an access block immediately before a final completion decision', async () => {
+    const blocks = [false, false, false, true];
+    const env = environment({ hasAccessBlock: () => blocks.shift() ?? true, atBottom: () => true });
+    const seed = note('seed');
+
+    await expect(collectUntilStable({ environment: env, readNotes: () => [], seed: [seed], stableRounds: 1 }))
+      .rejects.toMatchObject({ code: 'ACCESS_BLOCKED', notes: [seed] });
+    expect(env.scrolls).toBe(0);
+  });
+
+  it.each([
     [{ stableRounds: 0 }],
     [{ stableRounds: 1.5 }],
     [{ maxStalledRounds: 0 }],
@@ -204,7 +286,11 @@ describe('collectUntilStable', () => {
 });
 
 describe('browserScrollEnvironment', () => {
-  afterEach(() => { document.body.innerHTML = ''; });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
 
   it('detects visible verification and access-frequency dialogs but ignores unrelated text', () => {
     const env = browserScrollEnvironment;
@@ -251,6 +337,29 @@ describe('browserScrollEnvironment', () => {
     expect(env.hasAccessBlock()).toBe(false);
   });
 
+  it('lets strong challenge phrases win over help footers but suppresses ambiguous safety tutorials', () => {
+    const env = browserScrollEnvironment;
+    document.body.innerHTML = '<div role="dialog">人机验证<footer>帮助与说明</footer></div>';
+    expect(env.hasAccessBlock()).toBe(true);
+    document.body.innerHTML = '<div role="dialog">安全验证最佳实践和帮助说明</div>';
+    expect(env.hasAccessBlock()).toBe(false);
+  });
+
+  it('ignores transparent or positive-size offscreen dialogs while keeping jsdom zero-size dialogs visible', () => {
+    const env = browserScrollEnvironment;
+    document.body.innerHTML = '<div style="opacity: 0"><div role="dialog">人机验证</div></div>';
+    expect(env.hasAccessBlock()).toBe(false);
+    document.body.innerHTML = '<div role="dialog">人机验证</div>';
+    const dialog = document.querySelector('[role="dialog"]')!;
+    vi.spyOn(dialog, 'getBoundingClientRect').mockReturnValue({
+      x: 0, y: 10_000, top: 10_000, left: 0, right: 100, bottom: 10_100, width: 100, height: 100,
+      toJSON: () => ({}),
+    });
+    expect(env.hasAccessBlock()).toBe(false);
+    vi.restoreAllMocks();
+    expect(env.hasAccessBlock()).toBe(true);
+  });
+
   it('cleans up its abort listener and timer when waiting is aborted', async () => {
     vi.useFakeTimers();
     const env = browserScrollEnvironment;
@@ -260,7 +369,6 @@ describe('browserScrollEnvironment', () => {
 
     await expect(promise).resolves.toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
-    vi.useRealTimers();
   });
 
   it('cleans up its timer after a normal wait resolution', async () => {
@@ -271,6 +379,5 @@ describe('browserScrollEnvironment', () => {
 
     await expect(promise).resolves.toBeUndefined();
     expect(vi.getTimerCount()).toBe(0);
-    vi.useRealTimers();
   });
 });

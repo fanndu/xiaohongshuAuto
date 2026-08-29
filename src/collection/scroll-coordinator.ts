@@ -22,8 +22,8 @@ export class CollectionError extends Error {
 }
 
 export interface CollectUntilStableOptions {
-  readNotes: () => readonly NoteRecord[] | Promise<readonly NoteRecord[]>;
-  onProgress?: (count: number) => void;
+  readNotes: (signal: AbortSignal) => readonly NoteRecord[] | Promise<readonly NoteRecord[]>;
+  onProgress?: (count: number) => void | Promise<void>;
   signal?: AbortSignal;
   environment: ScrollEnvironment;
   stableRounds?: number;
@@ -45,6 +45,36 @@ function throwStalled(store: NoteStore, cause?: unknown): never {
   throw new CollectionError('LOAD_STALLED', store.values(), cause);
 }
 
+type AbortRace<T> =
+  | { kind: 'value'; value: T }
+  | { kind: 'error'; error: unknown }
+  | { kind: 'aborted' };
+
+function raceWithAbort<T>(work: PromiseLike<T>, signal: AbortSignal): Promise<AbortRace<T>> {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = (result: AbortRace<T>) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    };
+    const onAbort = () => finish({ kind: 'aborted' });
+    const source = Promise.resolve(work);
+    if (signal.aborted) {
+      // Keep a handler attached even after cancellation so a late rejection is not unhandled.
+      source.then(() => undefined, () => undefined);
+      finish({ kind: 'aborted' });
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    source.then(
+      value => finish({ kind: 'value', value }),
+      error => finish({ kind: 'error', error }),
+    );
+  });
+}
+
 /** Reads, deduplicates, and scrolls until three bottom rounds show no new notes. */
 export async function collectUntilStable(options: CollectUntilStableOptions): Promise<CollectionProgress> {
   const stableRounds = options.stableRounds ?? 3;
@@ -55,69 +85,99 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
   }
 
   const store = new NoteStore();
-  store.addMany(options.seed ?? []);
+  try {
+    store.addMany(options.seed ?? []);
+  } catch (error) {
+    return throwStalled(store, error);
+  }
   const stopped = (): CollectionProgress => ({ reason: 'stopped', notes: store.values() });
+  const signal = options.signal ?? new AbortController().signal;
+  const checkAccess = (): CollectionProgress | undefined => {
+    try {
+      const blocked = options.environment.hasAccessBlock();
+      if (signal.aborted) return stopped();
+      if (blocked) throw new CollectionError('ACCESS_BLOCKED', store.values());
+    } catch (error) {
+      if (signal.aborted) return stopped();
+      if (error instanceof CollectionError) throw error;
+      return throwStalled(store, error);
+    }
+    return undefined;
+  };
   let stable = 0;
   let stalled = 0;
 
   while (true) {
-    if (options.signal?.aborted) return stopped();
+    if (signal.aborted) return stopped();
+    const beforeRead = checkAccess();
+    if (beforeRead) return beforeRead;
 
+    let readWork: readonly NoteRecord[] | Promise<readonly NoteRecord[]>;
     try {
-      const hasAccessBlock = options.environment.hasAccessBlock();
-      if (options.signal?.aborted) return stopped();
-      if (hasAccessBlock) {
-        throw new CollectionError('ACCESS_BLOCKED', store.values());
-      }
+      readWork = options.readNotes(signal);
     } catch (error) {
-      if (options.signal?.aborted) return stopped();
-      if (error instanceof CollectionError) throw error;
+      if (signal.aborted) return stopped();
       return throwStalled(store, error);
     }
+    const readResult = await raceWithAbort(Promise.resolve(readWork), signal);
+    if (readResult.kind === 'aborted') return stopped();
+    if (readResult.kind === 'error') return throwStalled(store, readResult.error);
+    if (!Array.isArray(readResult.value)) return throwStalled(store, new TypeError('readNotes must return an array'));
 
-    let read: readonly NoteRecord[];
+    let added: number;
     try {
-      read = await options.readNotes();
+      added = store.addMany(readResult.value);
     } catch (error) {
-      if (options.signal?.aborted) return stopped();
       return throwStalled(store, error);
     }
-    const added = store.addMany(read);
-    if (options.signal?.aborted) return stopped();
+    if (signal.aborted) return stopped();
+    const afterRead = checkAccess();
+    if (afterRead) return afterRead;
+
+    let progressWork: void | Promise<void> | undefined;
     try {
-      options.onProgress?.(store.size);
+      progressWork = options.onProgress?.(store.size);
     } catch (error) {
-      if (options.signal?.aborted) return stopped();
+      if (signal.aborted) return stopped();
       return throwStalled(store, error);
     }
-    if (options.signal?.aborted) return stopped();
+    const progressResult = await raceWithAbort(Promise.resolve(progressWork), signal);
+    if (progressResult.kind === 'aborted') return stopped();
+    if (progressResult.kind === 'error') return throwStalled(store, progressResult.error);
+    const afterProgress = checkAccess();
+    if (afterProgress) return afterProgress;
 
     let atBottom: boolean;
     try {
       atBottom = options.environment.atBottom();
     } catch (error) {
-      if (options.signal?.aborted) return stopped();
+      if (signal.aborted) return stopped();
       return throwStalled(store, error);
     }
-    if (options.signal?.aborted) return stopped();
+    if (signal.aborted) return stopped();
     if (added === 0 && atBottom) stable += 1;
     else stable = 0;
     stalled = added === 0 ? stalled + 1 : 0;
 
-    if (options.signal?.aborted) return stopped();
+    const beforeDecision = checkAccess();
+    if (beforeDecision) return beforeDecision;
+    if (signal.aborted) return stopped();
     if (stable >= stableRounds) return { reason: 'complete', notes: store.values() };
     if (stalled >= maxStalledRounds) return throwStalled(store);
-    if (options.signal?.aborted) return stopped();
+    if (signal.aborted) return stopped();
 
+    let waitWork: Promise<void>;
     try {
       options.environment.scrollToBottom();
-      if (options.signal?.aborted) return stopped();
-      await options.environment.wait(intervalMs, options.signal ?? new AbortController().signal);
+      if (signal.aborted) return stopped();
+      waitWork = options.environment.wait(intervalMs, signal);
     } catch (error) {
-      if (options.signal?.aborted) return stopped();
+      if (signal.aborted) return stopped();
       return throwStalled(store, error);
     }
-    if (options.signal?.aborted) return stopped();
+    const waitResult = await raceWithAbort(waitWork, signal);
+    if (waitResult.kind === 'aborted') return stopped();
+    if (waitResult.kind === 'error') return throwStalled(store, waitResult.error);
   }
 }
 
@@ -126,6 +186,13 @@ function isVisible(element: Element, win: Window): boolean {
     if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
     const style = win.getComputedStyle(current);
     if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+    if (style.opacity === '0') return false;
+  }
+  const rect = element.getBoundingClientRect();
+  if (rect.width > 0 && rect.height > 0) {
+    const viewportWidth = win.innerWidth;
+    const viewportHeight = win.innerHeight;
+    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= viewportWidth || rect.top >= viewportHeight) return false;
   }
   return true;
 }
@@ -159,10 +226,11 @@ function createBrowserScrollEnvironment(doc: Document, win: Window): ScrollEnvir
       ].join(','));
       return [...candidates].some(element => {
         const text = element.textContent?.trim() ?? '';
+        const strongChallenge = /(人机验证|验证码|请完成验证|访问频繁|操作频繁)/.test(text);
+        const ambiguousSafetyChallenge = /安全验证/.test(text) && !/(教程|帮助|说明|如何(?:完成)?验证|最佳实践)/.test(text);
         return isChallengeContainer(element)
           && isVisible(element, win)
-          && /(人机验证|验证码|请完成验证|安全验证|访问频繁|操作频繁)/.test(text)
-          && !/(教程|帮助|说明|如何(?:完成)?验证)/.test(text);
+          && (strongChallenge || ambiguousSafetyChallenge);
       });
     },
     scrollToBottom: () => {
