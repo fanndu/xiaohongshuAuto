@@ -1,16 +1,23 @@
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { CollectorController } from '../src/app/collector-controller';
 import { collectUntilStable, type ScrollEnvironment } from '../src/collection/scroll-coordinator';
 import { formatLocalDateTime } from '../src/domain/normalize';
+import type { CollectionResult } from '../src/domain/types';
 import { buildWorkbookBuffer } from '../src/export/workbook';
 import { mergeProfile } from '../src/parsing/merge';
 import { parseDomPage } from '../src/parsing/dom';
 import { parseStructuredPage } from '../src/parsing/structured-data';
+import type { UiState } from '../src/ui/floating-control';
 
 const profileUrl = 'https://www.xiaohongshu.com/user/profile/azhe';
-const fixture = readFileSync(resolve(process.cwd(), 'tests/fixtures/profile-page.html'), 'utf8');
+const fixture = readFileSync(
+  fileURLToPath(new URL(['.', 'fixtures', 'profile-page.html'].join('/'), import.meta.url)),
+  'utf8',
+);
+const originalBodyHtml = document.body.innerHTML;
 
 function fakeScrollEnvironment(): ScrollEnvironment & { scrolls: number } {
   const environment = {
@@ -23,57 +30,90 @@ function fakeScrollEnvironment(): ScrollEnvironment & { scrolls: number } {
   return environment;
 }
 
+afterEach(() => {
+  document.body.innerHTML = originalBodyHtml;
+});
+
 describe('collector module integration', () => {
-  it('collects a merged profile through stable rounds and exports a URL-only workbook', async () => {
+  it('runs the controller through stable collection and automatic URL-only export', async () => {
     document.body.innerHTML = fixture;
-    const structured = parseStructuredPage(document, profileUrl);
-    const dom = parseDomPage(document, profileUrl);
+    const environment = fakeScrollEnvironment();
+    // Mounting renders the initial ready state; the controller owns the later run states.
+    const states: UiState[] = [{ phase: 'ready' }];
+    const exported: CollectionResult[] = [];
+    let workbook: ExcelJS.Workbook | undefined;
     const collectedAt = formatLocalDateTime(new Date('2026-08-29T04:34:56.000Z'), -480);
 
-    expect(structured.profile).toMatchObject({
-      accountName: '旅行摄影阿哲',
-      followers: { raw: '1.3万', value: 13000 },
+    const readPage = () => ({
+      structured: parseStructuredPage(document, profileUrl),
+      dom: parseDomPage(document, profileUrl),
     });
-    expect(structured.notes).toMatchObject([{
-      id: 'abc123',
-      title: '结构化雪山日出',
-      type: 'image',
-      likes: { raw: '1.5万', value: 15000 },
-      coverUrl: 'https://img.example/structured-cover.jpg',
-    }]);
-
-    const environment = fakeScrollEnvironment();
-    const collected = await collectUntilStable({
-      environment,
-      intervalMs: 0,
-      seed: structured.notes,
-      readNotes: () => parseDomPage(document, profileUrl).notes,
+    const controller = new CollectorController({
+      ui: { render: state => { states.push({ ...state }); } },
+      readProfile: () => {
+        const page = readPage();
+        return mergeProfile(page.structured.profile, page.dom.profile, profileUrl, collectedAt);
+      },
+      collect: (signal, onProgress) => {
+        const initial = readPage();
+        return collectUntilStable({
+          environment,
+          intervalMs: 0,
+          signal,
+          onProgress,
+          seed: [...initial.structured.notes, ...initial.dom.notes],
+          readNotes: () => {
+            const page = readPage();
+            return [...page.structured.notes, ...page.dom.notes];
+          },
+        });
+      },
+      exportResult: async result => {
+        exported.push(result);
+        const buffer = await buildWorkbookBuffer(result);
+        workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer as never);
+      },
     });
-    const profile = mergeProfile(structured.profile, dom.profile, profileUrl, collectedAt);
 
-    expect(collected.reason).toBe('complete');
+    await controller.start();
+
+    expect(states).toEqual([
+      { phase: 'ready' },
+      { phase: 'collecting', count: 0 },
+      { phase: 'collecting', count: 1 },
+      { phase: 'collecting', count: 1 },
+      { phase: 'collecting', count: 1 },
+      { phase: 'complete', count: 1 },
+    ]);
     expect(environment.scrolls).toBe(2);
-    expect(profile).toMatchObject({
-      profileUrl,
-      accountName: '旅行摄影阿哲',
-      avatarUrl: 'https://img.example/avatar.jpg',
-      followers: { raw: '1.3万', value: 13000 },
-      collectedAt: '2026-08-29T12:34:56+08:00',
-    });
-    expect(collected.notes).toEqual([{
-      id: 'abc123',
-      title: '雪山日出',
-      noteUrl: 'https://www.xiaohongshu.com/explore/abc123',
-      type: 'video',
-      likes: { raw: '2.3万', value: 23000 },
-      coverUrl: 'https://img.example/cover.jpg',
-      exportNotes: [],
+    expect(exported).toEqual([{
+      profile: {
+        profileUrl,
+        accountName: '旅行摄影阿哲',
+        redId: 'xhs_azhe',
+        avatarUrl: 'https://img.example/avatar.jpg',
+        description: '记录山川',
+        ipLocation: '美国',
+        following: { raw: '128', value: 128 },
+        followers: { raw: '1.3万', value: 13000 },
+        likedAndCollected: { raw: '8.6万', value: 86000 },
+        collectedAt: '2026-08-29T12:34:56+08:00',
+        exportNotes: [],
+      },
+      notes: [{
+        id: 'abc123',
+        title: '雪山日出',
+        noteUrl: 'https://www.xiaohongshu.com/explore/abc123',
+        type: 'video',
+        likes: { raw: '2.3万', value: 23000 },
+        coverUrl: 'https://img.example/cover.jpg',
+        exportNotes: [],
+      }],
     }]);
 
-    const buffer = await buildWorkbookBuffer({ profile, notes: collected.notes });
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer as never);
-
+    expect(workbook).toBeDefined();
+    if (!workbook) throw new Error('Expected automatic workbook export');
     expect(workbook.worksheets.map(sheet => sheet.name)).toEqual(['博主信息', '作品列表']);
     expect(workbook.model.media).toEqual([]);
 
