@@ -26,6 +26,7 @@ interface ExportRequest {
   readonly generation: number;
   readonly origin: ExportOrigin;
   readonly promise: Promise<ExportOutcome>;
+  readonly publicPromise: Promise<void>;
   readonly token: number;
   readonly version: number;
 }
@@ -121,7 +122,7 @@ export class CollectorController {
       }
     }
     const request = this.queueExport('manual', this.generation);
-    return (request?.promise as Promise<void> | undefined) ?? Promise.resolve();
+    return request?.publicPromise ?? Promise.resolve();
   }
 
   dispose(): void {
@@ -220,7 +221,7 @@ export class CollectorController {
       }
       return outcome;
     });
-    request = { generation, origin, promise, token, version };
+    request = { generation, origin, promise, publicPromise: promise.then(() => undefined), token, version };
     this.pendingExports.set(version, request);
     this.exportTail = promise.then(() => undefined);
     return request;

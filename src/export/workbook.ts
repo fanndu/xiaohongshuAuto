@@ -212,16 +212,34 @@ export function makeWorkbookFilename(accountName: string, date = new Date()): st
   return `${sanitizeFilenamePart(accountName)}_小红书主页_${datePart}.xlsx`;
 }
 
-export async function downloadWorkbook(result: CollectionResult): Promise<void> {
+export interface DownloadWorkbookOptions {
+  /** Prevents browser download side effects after a page lifecycle has ended. */
+  signal?: AbortSignal;
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+  throw new DOMException('Workbook download was aborted', 'AbortError');
+}
+
+export async function downloadWorkbook(result: CollectionResult, options: DownloadWorkbookOptions = {}): Promise<void> {
+  throwIfAborted(options.signal);
   const buffer = await buildWorkbookBuffer(result);
+  // ExcelJS generation is synchronous once entered and cannot be preempted. This
+  // check prevents its completed buffer from becoming a download after navigation.
+  throwIfAborted(options.signal);
   const blob = new Blob([buffer as unknown as BlobPart], { type: XLSX_MIME_TYPE });
+  throwIfAborted(options.signal);
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = objectUrl;
   anchor.download = makeWorkbookFilename(result.profile.accountName);
 
   try {
+    throwIfAborted(options.signal);
     document.body.appendChild(anchor);
+    throwIfAborted(options.signal);
     anchor.click();
   } finally {
     anchor.remove();

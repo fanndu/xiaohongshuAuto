@@ -305,6 +305,29 @@ describe('downloadWorkbook', () => {
     expect(revokeObjectURL).toHaveBeenCalledWith(objectUrl);
   });
 
+  it('does not create a download after its lifecycle signal aborts during workbook generation', async () => {
+    const written = (() => {
+      let resolve: (value: Uint8Array) => void = () => undefined;
+      const promise = new Promise<Uint8Array>(nextResolve => { resolve = nextResolve; });
+      return { promise, resolve };
+    })();
+    vi.spyOn(ExcelJS.Workbook.prototype, 'xlsx', 'get').mockReturnValue({
+      writeBuffer: vi.fn(() => written.promise),
+    } as never);
+    const createObjectURL = vi.fn(() => 'blob:workbook');
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL: vi.fn() });
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined);
+    const lifecycle = new AbortController();
+
+    const download = downloadWorkbook(result(), { signal: lifecycle.signal });
+    lifecycle.abort();
+    written.resolve(new Uint8Array([1, 2, 3]));
+
+    await expect(download).rejects.toMatchObject({ name: 'AbortError' });
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(click).not.toHaveBeenCalled();
+  });
+
   it('removes the anchor and schedules revocation when clicking throws', async () => {
     vi.useFakeTimers();
     vi.spyOn(ExcelJS.Workbook.prototype, 'xlsx', 'get').mockReturnValue({

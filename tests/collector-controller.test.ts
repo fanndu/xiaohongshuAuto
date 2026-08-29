@@ -178,6 +178,12 @@ describe('CollectorController', () => {
     expect(deps.exportResult).toHaveBeenCalledWith({ profile: profile(), notes: [] });
   });
 
+  it('fulfills the public partial-export promise with void', async () => {
+    const controller = new CollectorController(dependencies());
+
+    await expect(controller.exportPartial()).resolves.toBeUndefined();
+  });
+
   it('isolates controller records from an exporter that mutates its input', async () => {
     const seen: Array<{ profile: ProfileRecord; notes: NoteRecord[] }> = [];
     const deps = dependencies({ exportResult: vi.fn(async result => {
