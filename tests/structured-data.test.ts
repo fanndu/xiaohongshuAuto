@@ -443,7 +443,7 @@ describe('parseStructuredPage', () => {
 
   it('maps current nested user notes through noteCard wrappers', () => {
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
-      user: { userId: 'u1', userPageData: { basicInfo: { nickname: 'U1' }, interactions: [], notes: [] }, notes: [[{
+      user: { userId: 'u1', userPageData: { basicInfo: { nickname: 'U1' }, interactions: [] }, notes: [[{
         noteCard: { noteId: 'nested-current', displayTitle: 'Current nested note', type: 'normal', cover: { urlDefault: 'https://img.example/current.jpg' }, interactInfo: { likedCount: '7' } },
       }]] },
     })};</script>`;
@@ -506,6 +506,73 @@ describe('parseStructuredPage', () => {
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(alice)};</script><script></script>`;
     document.querySelectorAll('script')[1]!.textContent = 'window.__INITIAL_STATE__ = @';
     expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted', profile: null });
+  });
+
+  it('uses userPageData notes authoritatively and excludes stale sibling notes', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
+      userId: 'bob', userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [{ id: 'bob-note' }] },
+      notes: [{ noteCard: { id: 'alice-note', userId: 'alice' } }],
+    } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob').notes.map(note => note.id)).toEqual(['bob-note']);
+  });
+
+  it('uses sibling notes only with a matching explicit parent identity and fails closed on note-card identity mismatch', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
+      userId: 'bob', userPageData: { basicInfo: { nickname: 'Bob' }, interactions: [] },
+      notes: [{ noteCard: { id: 'bob-note', userId: 'bob' } }],
+    } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', identityStatus: 'valid', hasNotesContainer: true, notes: [{ id: 'bob-note' }],
+    });
+
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
+      userId: 'bob', userPageData: { basicInfo: { nickname: 'Bob' }, interactions: [] },
+      notes: [{ noteCard: { id: 'alice-note', userId: 'alice' } }],
+    } })};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({ identityStatus: 'conflict', notes: [] });
+  });
+
+  it('unwraps bounded reactive maps, preserves wrapper identities, and reads current cover variants', () => {
+    const reactive = {
+      user: {
+        _rawValue: {
+          userId: 'bob',
+          userPageData: {
+            _value: {
+              basicInfo: { value: { nickname: 'Bob' } },
+              interactions: [],
+              notes: { value: [{
+                0: {
+                  id: 'wrapped-id', url: '/explore/wrapped-id',
+                  noteCard: { value: {
+                    displayTitle: 'Wrapped',
+                    cover: { _value: { infoList: [{ url: 'https://img.example/info.jpg' }] } },
+                    interactInfo: { value: { likedCount: '8' } },
+                  } },
+                },
+              }] },
+            },
+          },
+        },
+      },
+    };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(reactive)};</script>`;
+    expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({ notes: [{
+      id: 'wrapped-id', title: 'Wrapped', coverUrl: 'https://img.example/info.jpg', likes: { raw: '8', value: 8 },
+    }] });
+  });
+
+  it('caches token classification for unchanged oversized candidates and supports parenthesized assignments', () => {
+    structuredStateTestHooks.reset();
+    const oversized = `<script>(window).__INITIAL_STATE__ = ${JSON.stringify({ user: { userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [] } } })};${' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1)}</script>`;
+    document.body.innerHTML = oversized;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ identityStatus: 'budget_exhausted' });
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ identityStatus: 'budget_exhausted' });
+    expect(structuredStateTestHooks.tokenizeCalls()).toBe(1);
+    const script = document.querySelector('script')!;
+    script.textContent = `(window . __INITIAL_STATE__) = ${JSON.stringify({ user: { userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [] } } })};`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'bob', identityStatus: 'valid' });
+    expect(structuredStateTestHooks.tokenizeCalls()).toBe(2);
   });
 
   it('skips unrelated scripts before Acorn and caches unchanged candidate script text', () => {

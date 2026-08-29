@@ -398,4 +398,18 @@ describe('parseDomPage', () => {
       id: 'same', type: 'unknown', exportNotes: ['作品类型证据冲突'],
     }]);
   });
+
+  it('scopes current profile stats and works to the bound Bob root, ignoring stale global Alice content', () => {
+    document.body.innerHTML = `
+      <div class="data-info"><div class="data-item"><span>关注</span><strong>999</strong></div></div>
+      <section class="feeds-page" data-user-id="alice"><article class="note-item"><a href="/explore/alice-note"></a></article></section>
+      <section class="user" data-user-id="bob"><a href="/user/profile/bob">Bob</a><span class="user-name">Bob</span>
+        <div class="data-info"><div class="data-item"><span>关注</span><strong>7</strong></div></div>
+        <section class="feeds-page"><article class="note-item"><a href="/explore/bob-note"></a></article></section>
+      </section>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      userId: 'bob', hasWorksContainer: true,
+      profile: { following: { raw: '7', value: 7 } }, notes: [{ id: 'bob-note' }],
+    });
+  });
 });

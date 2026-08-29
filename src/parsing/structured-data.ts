@@ -35,27 +35,93 @@ interface CachedScriptParse {
   state: unknown;
 }
 
+interface CachedClassification {
+  source: string;
+  classification: CandidateClassification;
+}
+
 let parsedScriptCount = 0;
 let scriptParseCache = new WeakMap<HTMLScriptElement, CachedScriptParse>();
+let tokenizedScriptCount = 0;
+let classificationCache = new WeakMap<HTMLScriptElement, CachedClassification>();
 
 /** Test-only observability; production parsing behavior is unchanged by this seam. */
 export const structuredStateTestHooks = {
   reset(): void {
     parsedScriptCount = 0;
     scriptParseCache = new WeakMap<HTMLScriptElement, CachedScriptParse>();
+    tokenizedScriptCount = 0;
+    classificationCache = new WeakMap<HTMLScriptElement, CachedClassification>();
   },
   parseCalls(): number {
     return parsedScriptCount;
   },
+  tokenizeCalls(): number {
+    return tokenizedScriptCount;
+  },
 };
 
-const record = (value: unknown): JsonRecord | null =>
-  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
+function rawRecord(value: unknown): JsonRecord | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
+}
 
-const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+/** Reads only own data properties, so reactive wrappers and hostile getters cannot execute here. */
+function own(value: JsonRecord | null, key: string): unknown {
+  if (!value) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasOwn(value: JsonRecord | null, key: string): boolean {
+  if (!value) return false;
+  try {
+    return Object.prototype.hasOwnProperty.call(value, key);
+  } catch {
+    return false;
+  }
+}
+
+function ownKeys(value: JsonRecord | null): string[] {
+  if (!value) return [];
+  try {
+    return Object.keys(value);
+  } catch {
+    return [];
+  }
+}
+
+/** Conservative Vue-style ref unwrapping, bounded and limited to own data properties. */
+function unwrap(value: unknown): unknown {
+  let current = value;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 4; depth += 1) {
+    const candidate = rawRecord(current);
+    if (!candidate || seen.has(candidate)) break;
+    seen.add(candidate);
+    let next: unknown = undefined;
+    for (const key of ['_rawValue', '_value', 'value']) {
+      if (hasOwn(candidate, key)) {
+        next = own(candidate, key);
+        break;
+      }
+    }
+    if (next === undefined) break;
+    current = next;
+  }
+  return current;
+}
+
+const record = (value: unknown): JsonRecord | null => rawRecord(unwrap(value));
+
+const string = (value: unknown): string => typeof unwrap(value) === 'string' ? (unwrap(value) as string).trim() : '';
 
 function hasUserPageData(value: unknown): boolean {
-  return record(record(record(value)?.user)?.userPageData) !== null;
+  const page = record(own(record(value), 'user'));
+  return record(own(page, 'userPageData')) !== null;
 }
 
 function firstString(...values: unknown[]): string {
@@ -175,23 +241,41 @@ type CandidateClassification = 'candidate' | 'none' | 'ambiguous';
 function classifyInitialStateCandidate(source: string): CandidateClassification {
   if (!source.includes('__INITIAL_STATE__')) return 'none';
   try {
+    tokenizedScriptCount += 1;
     const tokens = tokenizer(source, { ecmaVersion: 'latest' });
-    let previousLabel = '';
-    let stage = 0;
+    const recent: Array<{ label: string; value: unknown }> = [];
     let found = false;
+    const isName = (token: { label: string; value: unknown }, expected: string) =>
+      token.label === 'name' && token.value === expected;
+    const notMemberTarget = (before: { label: string; value: unknown } | undefined) =>
+      before?.label !== '.' && before?.label !== '?.';
+    const direct = (): boolean => {
+      const start = recent.length - 4;
+      return start >= 0 && isName(recent[start]!, 'window') && recent[start + 1]?.label === '.'
+        && isName(recent[start + 2]!, '__INITIAL_STATE__') && recent[start + 3]?.label === '='
+        && notMemberTarget(recent[start - 1]);
+    };
+    const wrappedWindow = (): boolean => {
+      const start = recent.length - 6;
+      return start >= 0 && recent[start]?.label === '(' && isName(recent[start + 1]!, 'window')
+        && recent[start + 2]?.label === ')' && recent[start + 3]?.label === '.'
+        && isName(recent[start + 4]!, '__INITIAL_STATE__') && recent[start + 5]?.label === '='
+        && notMemberTarget(recent[start - 1]);
+    };
+    const wrappedMember = (): boolean => {
+      const start = recent.length - 6;
+      return start >= 0 && recent[start]?.label === '(' && isName(recent[start + 1]!, 'window')
+        && recent[start + 2]?.label === '.' && isName(recent[start + 3]!, '__INITIAL_STATE__')
+        && recent[start + 4]?.label === ')' && recent[start + 5]?.label === '='
+        && notMemberTarget(recent[start - 1]);
+    };
     for (;;) {
       const token = tokens.getToken();
       const label = token.type.label;
       if (label === 'eof') return found ? 'candidate' : 'none';
-      const identifier = label === 'name' && (token as { value?: unknown }).value;
-      if (stage === 1) stage = label === '.' ? 2 : 0;
-      else if (stage === 2) stage = identifier === '__INITIAL_STATE__' ? 3 : 0;
-      else if (stage === 3) {
-        if (label === '=') found = true;
-        stage = 0;
-      }
-      if (identifier === 'window' && previousLabel !== '.' && previousLabel !== '?.') stage = 1;
-      previousLabel = label;
+      recent.push({ label, value: (token as { value?: unknown }).value });
+      if (recent.length > 7) recent.shift();
+      if (direct() || wrappedWindow() || wrappedMember()) found = true;
     }
   } catch {
     // A marker-bearing script that cannot be lexed is unsafe to classify as an older route's state.
@@ -204,7 +288,10 @@ function readInitialState(doc: Document): { state: unknown; budgetExhausted: boo
   let candidateChars = 0;
   for (const script of doc.querySelectorAll('script')) {
     const source = script.textContent ?? '';
-    const classification = classifyInitialStateCandidate(source);
+    const cached = classificationCache.get(script);
+    const classification = cached?.source === source
+      ? cached.classification : classifyInitialStateCandidate(source);
+    if (!cached || cached.source !== source) classificationCache.set(script, { source, classification });
     if (classification === 'ambiguous') return { state: null, budgetExhausted: true };
     if (classification === 'none') continue;
     if (source.length > MAX_SCRIPT_CHARS) return { state: null, budgetExhausted: true };
@@ -224,27 +311,33 @@ function readInitialState(doc: Document): { state: unknown; budgetExhausted: boo
   return { state: null, budgetExhausted: false };
 }
 
-function flattenNotes(value: unknown): unknown[] {
-  if (!Array.isArray(value)) return [];
+function supportedNotesContainer(value: unknown): boolean {
+  const unwrapped = unwrap(value);
+  if (Array.isArray(unwrapped)) return true;
+  const container = rawRecord(unwrapped);
+  return Boolean(container && ownKeys(container).some(key => /^\d+$/.test(key)));
+}
 
+function flattenNotes(value: unknown): unknown[] {
   const flattened: unknown[] = [];
-  const pending: Array<{ values: unknown[]; index: number; depth: number }> = [
-    { values: value, index: 0, depth: 0 },
-  ];
-  // The root note array is a visited node too, so it consumes one unit of work.
-  let visits = 1;
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let visits = 0;
   while (pending.length > 0 && visits < MAX_NOTE_VISITS && flattened.length < MAX_NOTE_RECORDS) {
-    const current = pending[pending.length - 1];
-    if (!current) break;
-    if (current.depth >= MAX_NOTE_DEPTH || current.index >= current.values.length) {
-      pending.pop();
+    const current = pending.pop();
+    if (!current || current.depth >= MAX_NOTE_DEPTH) continue;
+    visits += 1;
+    const child = unwrap(current.value);
+    const candidate = rawRecord(child);
+    if (candidate && (hasOwn(candidate, 'noteCard') || hasOwn(candidate, 'id') || hasOwn(candidate, 'noteId') || hasOwn(candidate, 'url'))) {
+      flattened.push(child);
       continue;
     }
-    const child = current.values[current.index];
-    current.index += 1;
-    visits += 1;
-    if (Array.isArray(child)) pending.push({ values: child, index: 0, depth: current.depth + 1 });
-    else flattened.push(child);
+    const children = Array.isArray(child) ? child : candidate
+      ? ownKeys(candidate).filter(key => /^\d+$/.test(key)).sort((left, right) => Number(left) - Number(right)).map(key => own(candidate, key))
+      : [];
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push({ value: children[index], depth: current.depth + 1 });
+    }
   }
   return flattened;
 }
@@ -259,80 +352,108 @@ function generatedNoteUrl(id: string): string {
   return extractNoteId(noteUrl) === id ? noteUrl : '';
 }
 
-function mapNote(value: unknown): NoteRecord | null {
-  const source = record(record(value)?.noteCard) ?? record(value);
-  if (!source) return null;
+function noteIdentity(source: JsonRecord): string[] {
+  const author = record(own(source, 'author'));
+  const user = record(own(source, 'user'));
+  return [own(source, 'userId'), own(source, 'authorId'), own(author, 'userId'), own(user, 'userId')]
+    .map(string).filter(Boolean);
+}
 
-  const suppliedId = firstString(source.id, source.noteId);
-  const explicitUrl = normalizeNoteUrl(string(source.url));
+function coverUrl(cover: JsonRecord | null): string {
+  const infoList = unwrap(own(cover, 'infoList'));
+  const infoUrl = Array.isArray(infoList)
+    ? firstString(...infoList.slice(0, 10).map(item => own(record(item), 'url')))
+    : '';
+  return firstString(own(cover, 'urlDefault'), own(cover, 'urlPre'), own(cover, 'url'), own(cover, 'url_default'), infoUrl);
+}
+
+function mapNote(value: unknown, expectedIdentity: string): { note: NoteRecord | null; conflict: boolean } {
+  const wrapper = record(value);
+  const card = record(own(wrapper, 'noteCard'));
+  const source = card ?? wrapper;
+  if (!source) return { note: null, conflict: false };
+  const identities = [...(wrapper ? noteIdentity(wrapper) : []), ...noteIdentity(source)];
+  if (expectedIdentity && identities.some(identity => identity !== expectedIdentity)) return { note: null, conflict: true };
+
+  const suppliedId = firstString(own(wrapper, 'id'), own(wrapper, 'noteId'), own(source, 'id'), own(source, 'noteId'));
+  const explicitUrl = normalizeNoteUrl(firstString(own(wrapper, 'url'), own(source, 'url')));
   const explicitId = extractNoteId(explicitUrl);
-  if (suppliedId && explicitId && suppliedId !== explicitId) return null;
+  if (suppliedId && explicitId && suppliedId !== explicitId) return { note: null, conflict: false };
 
   const id = suppliedId || explicitId;
   const noteUrl = explicitId ? explicitUrl : generatedNoteUrl(suppliedId);
-  if (!id || !noteUrl || extractNoteId(noteUrl) !== id) return null;
+  if (!id || !noteUrl || extractNoteId(noteUrl) !== id) return { note: null, conflict: false };
 
-  const cover = record(source.cover);
-  const interactInfo = record(source.interactInfo);
-  return {
+  const cover = record(own(source, 'cover')) ?? record(own(wrapper, 'cover'));
+  const interactInfo = record(own(source, 'interactInfo')) ?? record(own(wrapper, 'interactInfo'));
+  return { note: {
     id,
-    title: firstString(source.displayTitle, source.title),
+    title: firstString(own(source, 'displayTitle'), own(source, 'title'), own(wrapper, 'displayTitle'), own(wrapper, 'title')),
     noteUrl,
-    type: noteType(source.type),
-    likes: parseCount(firstString(interactInfo?.likedCount, source.likedCount)),
-    coverUrl: firstString(cover?.urlDefault, cover?.urlPre, source.coverUrl),
+    type: noteType(firstString(own(source, 'type'), own(wrapper, 'type'))),
+    likes: parseCount(firstString(own(interactInfo, 'likedCount'), own(source, 'likedCount'), own(wrapper, 'likedCount'))),
+    coverUrl: firstString(coverUrl(cover), own(source, 'coverUrl'), own(wrapper, 'coverUrl')),
     exportNotes: [],
-  };
+  }, conflict: false };
 }
 
-function safelyMapNote(value: unknown): NoteRecord | null {
+function safelyMapNote(value: unknown, expectedIdentity: string): { note: NoteRecord | null; conflict: boolean } {
   try {
-    return mapNote(value);
+    return mapNote(value, expectedIdentity);
   } catch {
-    return null;
+    return { note: null, conflict: false };
   }
 }
 
 export function parseStructuredPage(doc: Document, profileUrl: string): StructuredPageResult {
   const read = readInitialState(doc);
-  const page = record(record(read.state)?.user);
-  const userPageData = record(page?.userPageData);
+  const page = record(own(record(read.state), 'user'));
+  const userPageData = record(own(page, 'userPageData'));
   if (!userPageData) return {
     userId: '', identityStatus: read.budgetExhausted ? 'budget_exhausted' : 'missing',
     hasProfileEvidence: false, hasNotesContainer: false, profile: null, notes: [],
   };
 
-  const basic = record(userPageData.basicInfo);
-  const interactions = Array.isArray(userPageData.interactions)
-    ? userPageData.interactions.map(record).filter((item): item is JsonRecord => item !== null)
+  const basic = record(own(userPageData, 'basicInfo'));
+  const interactionList = unwrap(own(userPageData, 'interactions'));
+  const interactions = Array.isArray(interactionList)
+    ? interactionList.map(record).filter((item): item is JsonRecord => item !== null)
     : [];
-  const countFor = (type: string) => parseCount(string(interactions.find(item => item.type === type)?.count));
+  const countFor = (type: string) => parseCount(string(own(interactions.find(item => string(own(item, 'type')) === type) ?? null, 'count')));
 
-  const identities = new Set([basic?.userId, userPageData.userId, page?.userId].map(string).filter(Boolean));
+  const identities = new Set([own(basic, 'userId'), own(userPageData, 'userId'), own(page, 'userId')].map(string).filter(Boolean));
   const identityStatus = read.budgetExhausted ? 'budget_exhausted'
     : identities.size > 1 ? 'conflict' : identities.size === 1 ? 'valid' : 'missing';
   const userId = identityStatus === 'valid' ? [...identities][0] ?? '' : '';
-  const noteContainers = [userPageData.notes, page?.notes].filter(Array.isArray);
+  const pageNotesExplicit = hasOwn(userPageData, 'notes');
+  const pageNotes = own(userPageData, 'notes');
+  const siblingNotes = own(page, 'notes');
+  const parentIdentity = string(own(page, 'userId'));
+  const selectedNotes = pageNotesExplicit && supportedNotesContainer(pageNotes) ? pageNotes
+    : !pageNotesExplicit && (!userId || parentIdentity === userId) && supportedNotesContainer(siblingNotes) ? siblingNotes
+      : undefined;
+  const mappedNotes = identityStatus !== 'conflict' && identityStatus !== 'budget_exhausted' && selectedNotes !== undefined
+    ? flattenNotes(selectedNotes).map(note => safelyMapNote(note, userId)) : [];
+  const noteConflict = mappedNotes.some(result => result.conflict);
   return {
-    userId,
-    identityStatus,
-    hasProfileEvidence: Boolean(basic && (string(basic.nickname) || string(basic.redId)
-      || firstString(basic.imageb, basic.images))),
-    hasNotesContainer: noteContainers.length > 0,
+    userId: noteConflict ? '' : userId,
+    identityStatus: noteConflict ? 'conflict' : identityStatus,
+    hasProfileEvidence: Boolean(basic && (string(own(basic, 'nickname')) || string(own(basic, 'redId'))
+      || firstString(own(basic, 'imageb'), own(basic, 'images')))),
+    hasNotesContainer: selectedNotes !== undefined,
     profile: {
       profileUrl,
-      accountName: string(basic?.nickname),
-      redId: string(basic?.redId),
-      avatarUrl: firstString(basic?.imageb, basic?.images),
-      description: string(basic?.desc),
-      ipLocation: string(basic?.ipLocation),
+      accountName: string(own(basic, 'nickname')),
+      redId: string(own(basic, 'redId')),
+      avatarUrl: firstString(own(basic, 'imageb'), own(basic, 'images')),
+      description: string(own(basic, 'desc')),
+      ipLocation: string(own(basic, 'ipLocation')),
       following: countFor('follows'),
       followers: countFor('fans'),
       likedAndCollected: countFor('interaction'),
       exportNotes: [],
     },
-    notes: noteContainers.flatMap(flattenNotes)
-      .map(safelyMapNote)
+    notes: noteConflict ? [] : mappedNotes.map(result => result.note)
       .filter((item): item is NoteRecord => item !== null),
   };
 }

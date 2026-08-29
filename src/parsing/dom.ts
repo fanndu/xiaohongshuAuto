@@ -114,8 +114,8 @@ function labelElement(item: Element, label: string): Element | null {
   return null;
 }
 
-function statRaw(doc: Document, label: string): string {
-  const items = doc.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]');
+function statRaw(scope: ParentNode, label: string): string {
+  const items = scope.querySelectorAll('.data-info .data-item, [data-testid="profile-stat"]');
   for (const item of items) {
     const semanticLabel = labelElement(item, label);
     if (!semanticLabel) continue;
@@ -131,13 +131,53 @@ function statRaw(doc: Document, label: string): string {
   return '';
 }
 
-function worksContainer(doc: Document): Element | null {
-  return doc.querySelector('[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page');
+const WORKS_SELECTOR = '[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page';
+
+function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
+  const values = new Set<string>();
+  for (const attribute of ['data-user-id', 'data-userid', 'data-profile-user-id']) {
+    const value = element.getAttribute(attribute)?.trim() ?? '';
+    if (value) values.add(value);
+  }
+  for (const anchor of element.querySelectorAll('a[href*="/user/profile/"]')) {
+    try {
+      const route = canonicalProfileRoute(new URL(anchor.getAttribute('href') ?? '', base).href);
+      if (route) values.add(route.key);
+    } catch {
+      // Malformed links are not identity evidence.
+    }
+  }
+  if (values.size !== 1) return { userId: '', identityStatus: values.size ? 'conflict' : 'missing' };
+  return { userId: [...values][0] ?? '', identityStatus: 'valid' };
 }
 
-function noteCards(doc: Document): Element[] {
-  const root = worksContainer(doc) ?? doc;
-  return [...root.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')];
+/** Select only a works area bound by the current header root or by its own explicit identity. */
+function worksContainer(doc: Document, root: Element | null, userId: string, base: string): Element | null {
+  if (!root || !userId) return null;
+  for (const candidate of root.querySelectorAll(WORKS_SELECTOR)) {
+    const identity = elementIdentity(candidate, base);
+    if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
+    return candidate;
+  }
+  // A recognized narrow profile page may bind a sibling header and works panel together.
+  const scope = root.closest('[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page');
+  if (scope) {
+    for (const candidate of scope.querySelectorAll(WORKS_SELECTOR)) {
+      const identity = elementIdentity(candidate, base);
+      if (identity.identityStatus === 'conflict' || (identity.identityStatus === 'valid' && identity.userId !== userId)) continue;
+      return candidate;
+    }
+  }
+  // Global content must carry its own explicit current identity; never take the first feed.
+  for (const candidate of doc.querySelectorAll(WORKS_SELECTOR)) {
+    const identity = elementIdentity(candidate, base);
+    if (identity.identityStatus === 'valid' && identity.userId === userId) return candidate;
+  }
+  return null;
+}
+
+function noteCards(root: ParentNode | null): Element[] {
+  return root ? [...root.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')] : [];
 }
 
 function noteLinks(card: Element, base: string): Array<{ id: string; noteUrl: string }> {
@@ -243,10 +283,6 @@ function profileRootElement(doc: Document): Element | null {
   return null;
 }
 
-function profileRoot(doc: Document): ParentNode {
-  return profileRootElement(doc) ?? doc;
-}
-
 /** A DOM fallback is safe only when it looks like a real profile, not a generic page fragment. */
 export function isRecognizedDomProfile(doc: Document): boolean {
   const page = parseDomPage(doc, location.href);
@@ -256,29 +292,22 @@ export function isRecognizedDomProfile(doc: Document): boolean {
 function domIdentity(doc: Document, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const root = profileRootElement(doc);
   if (!root) return { userId: '', identityStatus: 'missing' };
-  const values = new Set<string>();
-  for (const attribute of ['data-user-id', 'data-userid', 'data-profile-user-id']) {
-    const value = root.getAttribute(attribute)?.trim() ?? '';
-    if (value) values.add(value);
-  }
-  for (const anchor of root.querySelectorAll('a[href*="/user/profile/"]')) {
-    try {
-      const route = canonicalProfileRoute(new URL(anchor.getAttribute('href') ?? '', base).href);
-      if (route) values.add(route.key);
-    } catch {
-      // Malformed links are not identity evidence.
-    }
-  }
-  if (values.size !== 1) return { userId: '', identityStatus: values.size ? 'conflict' : 'missing' };
-  return { userId: [...values][0] ?? '', identityStatus: 'valid' };
+  return elementIdentity(root, base);
 }
 
 export function parseDomPage(
   doc: Document,
   profileUrl: string,
 ): DomPageResult {
-  const root = profileRoot(doc);
+  const rootElement = profileRootElement(doc);
+  const root = rootElement ?? doc;
   const identity = domIdentity(doc, profileUrl);
+  const currentWorks = identity.identityStatus === 'valid'
+    ? worksContainer(doc, rootElement, identity.userId, profileUrl)
+    // Diagnostics retain parser output for incomplete pages; the mount gate never treats
+    // a missing/conflicting-identity DOM source as usable.
+    : doc.querySelector(WORKS_SELECTOR);
+  const noteScope = currentWorks ?? (identity.identityStatus === 'valid' ? null : doc);
   const rawRedId = firstText(root, [
     '[data-testid="user-redId"]',
     '[data-testid="user-red-id"]',
@@ -322,16 +351,16 @@ export function parseDomPage(
       '[class*="user-desc"]',
     ]),
     ipLocation: stripLabel(rawIpLocation, 'IP属地'),
-    following: parseCount(statRaw(doc, '关注')),
-    followers: parseCount(statRaw(doc, '粉丝')),
-    likedAndCollected: parseCount(statRaw(doc, '获赞与收藏')),
+    following: parseCount(statRaw(rootElement ?? doc, '关注')),
+    followers: parseCount(statRaw(rootElement ?? doc, '粉丝')),
+    likedAndCollected: parseCount(statRaw(rootElement ?? doc, '获赞与收藏')),
     exportNotes: [],
   };
   return {
     ...identity,
     hasProfileEvidence: Boolean(profile.accountName || profile.redId || profile.avatarUrl),
-    hasWorksContainer: worksContainer(doc) !== null,
+    hasWorksContainer: currentWorks !== null,
     profile,
-    notes: uniqueNotes(noteCards(doc), profileUrl),
+    notes: uniqueNotes(noteCards(noteScope), profileUrl),
   };
 }
