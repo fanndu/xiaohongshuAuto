@@ -417,4 +417,17 @@ describe('parseStructuredPage', () => {
 
     expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('末尾状态');
   });
+
+  it('falls back when a later wrong-shaped assignment has a huge RHS', () => {
+    const valid = {
+      user: { userPageData: { basicInfo: { nickname: '较早有效状态' }, interactions: [], notes: [] } },
+    };
+    const wrongShape = `{"unexpected":[${'0,'.repeat(100_100)}0]}`;
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(valid)};`,
+      `window.__INITIAL_STATE__ = ${wrongShape};</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('较早有效状态');
+  });
 });

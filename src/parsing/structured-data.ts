@@ -6,7 +6,6 @@ import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 type JsonRecord = Record<string, unknown>;
 
 const MAX_SCRIPT_CHARS = 5_000_000;
-const MAX_AST_NODE_VISITS = 100_000;
 const MAX_NOTE_DEPTH = 64;
 const MAX_NOTE_VISITS = 10_000;
 const MAX_NOTE_RECORDS = 10_000;
@@ -111,11 +110,10 @@ function lastStateFromScript(source: string): unknown {
 
   let latest: { start: number; state: unknown } | null = null;
   const pending: Node[] = [program];
-  let visits = 0;
-  while (pending.length > 0 && visits < MAX_AST_NODE_VISITS) {
+  // The parser has already built the complete AST; a post-parse visit cap harms recovery without bounding parse cost.
+  while (pending.length > 0) {
     const node = pending.pop();
     if (!node) continue;
-    visits += 1;
 
     const rightHand = initialStateRightHand(node);
     if (rightHand) {
