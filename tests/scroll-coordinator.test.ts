@@ -39,7 +39,7 @@ describe('collectUntilStable', () => {
       environment: env,
       intervalMs: 0,
       readNotes: () => { reads += 1; return []; },
-      onProgress: notes => { progress.push(notes.length); },
+      onProgress: count => { progress.push(count); },
     });
 
     expect(result).toEqual({ reason: 'complete', notes: [] });
@@ -118,6 +118,60 @@ describe('collectUntilStable', () => {
     expect(env.scrolls).toBe(1);
   });
 
+  it('gives abort precedence when progress reporting aborts', async () => {
+    const controller = new AbortController();
+    const atBottom = vi.fn(() => true);
+    const env = environment({ atBottom });
+
+    await expect(collectUntilStable({
+      environment: env,
+      readNotes: () => [note('from-read')],
+      signal: controller.signal,
+      onProgress: () => { controller.abort(); },
+    })).resolves.toEqual({ reason: 'stopped', notes: [note('from-read')] });
+    expect(atBottom).not.toHaveBeenCalled();
+    expect(env.scrolls).toBe(0);
+  });
+
+  it('gives abort precedence when bottom detection aborts before completion', async () => {
+    const controller = new AbortController();
+    const env = environment({ atBottom: () => { controller.abort(); return true; } });
+
+    await expect(collectUntilStable({
+      environment: env,
+      readNotes: () => [],
+      signal: controller.signal,
+      stableRounds: 1,
+    })).resolves.toEqual({ reason: 'stopped', notes: [] });
+    expect(env.scrolls).toBe(0);
+  });
+
+  it('does not read, wait, or throw when an environment callback aborts', async () => {
+    const controller = new AbortController();
+    const readNotes = vi.fn(() => []);
+    const env = environment({ hasAccessBlock: () => { controller.abort(); return true; } });
+
+    await expect(collectUntilStable({ environment: env, readNotes, signal: controller.signal }))
+      .resolves.toEqual({ reason: 'stopped', notes: [] });
+    expect(readNotes).not.toHaveBeenCalled();
+    expect(env.scrolls).toBe(0);
+  });
+
+  it('does not wait when scrolling aborts', async () => {
+    const controller = new AbortController();
+    const wait = vi.fn(() => Promise.resolve());
+    const env = environment({
+      atBottom: () => false,
+      scrollToBottom: () => { controller.abort(); },
+      wait,
+    });
+
+    await expect(collectUntilStable({ environment: env, readNotes: () => [], signal: controller.signal }))
+      .resolves.toEqual({ reason: 'stopped', notes: [] });
+    expect(env.scrolls).toBe(0);
+    expect(wait).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['read', () => environment(), () => { throw new Error('read failed'); }],
     ['scroll', () => environment({ scrollToBottom: () => { throw new Error('scroll failed'); } }), () => []],
@@ -153,7 +207,7 @@ describe('browserScrollEnvironment', () => {
   afterEach(() => { document.body.innerHTML = ''; });
 
   it('detects visible verification and access-frequency dialogs but ignores unrelated text', () => {
-    const env = browserScrollEnvironment(document, window);
+    const env = browserScrollEnvironment;
     document.body.innerHTML = '<p>请验证一下你的邮箱地址</p><div class="article">验证码教程</div>';
     expect(env.hasAccessBlock()).toBe(false);
 
@@ -167,9 +221,21 @@ describe('browserScrollEnvironment', () => {
     expect(env.hasAccessBlock()).toBe(true);
   });
 
+  it('ignores challenge-looking text hidden by itself or an ancestor, and tutorial/help text', () => {
+    const env = browserScrollEnvironment;
+    document.body.innerHTML = '<div hidden><div role="dialog">请完成验证</div></div>';
+    expect(env.hasAccessBlock()).toBe(false);
+    document.body.innerHTML = '<div style="display: none"><div class="verify-dialog">安全验证</div></div>';
+    expect(env.hasAccessBlock()).toBe(false);
+    document.body.innerHTML = '<div aria-hidden="true"><div class="access-frequency-dialog">访问频繁</div></div>';
+    expect(env.hasAccessBlock()).toBe(false);
+    document.body.innerHTML = '<div role="dialog">安全验证教程和帮助说明</div>';
+    expect(env.hasAccessBlock()).toBe(false);
+  });
+
   it('cleans up its abort listener and timer when waiting is aborted', async () => {
     vi.useFakeTimers();
-    const env = browserScrollEnvironment(document, window);
+    const env = browserScrollEnvironment;
     const controller = new AbortController();
     const promise = env.wait(1_000, controller.signal);
     controller.abort();
@@ -181,7 +247,7 @@ describe('browserScrollEnvironment', () => {
 
   it('cleans up its timer after a normal wait resolution', async () => {
     vi.useFakeTimers();
-    const env = browserScrollEnvironment(document, window);
+    const env = browserScrollEnvironment;
     const promise = env.wait(1_000, new AbortController().signal);
     await vi.advanceTimersByTimeAsync(1_000);
 

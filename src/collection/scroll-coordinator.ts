@@ -23,7 +23,7 @@ export class CollectionError extends Error {
 
 export interface CollectUntilStableOptions {
   readNotes: () => readonly NoteRecord[] | Promise<readonly NoteRecord[]>;
-  onProgress?: (notes: NoteRecord[]) => void | Promise<void>;
+  onProgress?: (count: number) => void;
   signal?: AbortSignal;
   environment: ScrollEnvironment;
   stableRounds?: number;
@@ -64,7 +64,9 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
     if (options.signal?.aborted) return stopped();
 
     try {
-      if (options.environment.hasAccessBlock()) {
+      const hasAccessBlock = options.environment.hasAccessBlock();
+      if (options.signal?.aborted) return stopped();
+      if (hasAccessBlock) {
         throw new CollectionError('ACCESS_BLOCKED', store.values());
       }
     } catch (error) {
@@ -80,11 +82,10 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
       if (options.signal?.aborted) return stopped();
       return throwStalled(store, error);
     }
-    if (options.signal?.aborted) return stopped();
-
     const added = store.addMany(read);
+    if (options.signal?.aborted) return stopped();
     try {
-      await options.onProgress?.(store.values());
+      options.onProgress?.(store.size);
     } catch (error) {
       if (options.signal?.aborted) return stopped();
       return throwStalled(store, error);
@@ -95,18 +96,22 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
     try {
       atBottom = options.environment.atBottom();
     } catch (error) {
+      if (options.signal?.aborted) return stopped();
       return throwStalled(store, error);
     }
+    if (options.signal?.aborted) return stopped();
     if (added === 0 && atBottom) stable += 1;
     else stable = 0;
     stalled = added === 0 ? stalled + 1 : 0;
 
+    if (options.signal?.aborted) return stopped();
     if (stable >= stableRounds) return { reason: 'complete', notes: store.values() };
     if (stalled >= maxStalledRounds) return throwStalled(store);
     if (options.signal?.aborted) return stopped();
 
     try {
       options.environment.scrollToBottom();
+      if (options.signal?.aborted) return stopped();
       await options.environment.wait(intervalMs, options.signal ?? new AbortController().signal);
     } catch (error) {
       if (options.signal?.aborted) return stopped();
@@ -117,16 +122,16 @@ export async function collectUntilStable(options: CollectUntilStableOptions): Pr
 }
 
 function isVisible(element: Element, win: Window): boolean {
-  if (element.hasAttribute('hidden') || element.getAttribute('aria-hidden') === 'true') return false;
-  const style = win.getComputedStyle(element);
-  return style.display !== 'none' && style.visibility !== 'hidden';
+  for (let current: Element | null = element; current; current = current.parentElement) {
+    if (current.hasAttribute('hidden') || current.getAttribute('aria-hidden') === 'true') return false;
+    const style = win.getComputedStyle(current);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return false;
+  }
+  return true;
 }
 
 /** Browser adapter that detects only modal-like verification and rate-limit challenges. */
-export function browserScrollEnvironment(
-  doc: Document = document,
-  win: Window = window,
-): ScrollEnvironment {
+function createBrowserScrollEnvironment(doc: Document, win: Window): ScrollEnvironment {
   return {
     atBottom: () => {
       const root = doc.documentElement;
@@ -145,8 +150,12 @@ export function browserScrollEnvironment(
         '[class*="access-frequency"]',
         '[class*="risk-control"]',
       ].join(','));
-      return [...candidates].some(element => isVisible(element, win)
-        && /(验证码|人机验证|安全验证|完成验证|访问频繁|操作频繁|captcha|verify)/i.test(element.textContent ?? ''));
+      return [...candidates].some(element => {
+        const text = element.textContent?.trim() ?? '';
+        return isVisible(element, win)
+          && /(请完成验证|安全验证|访问频繁|操作频繁)/.test(text)
+          && !/(教程|帮助|说明|如何(?:完成)?验证)/.test(text);
+      });
     },
     scrollToBottom: () => {
       const root = doc.documentElement;
@@ -169,3 +178,5 @@ export function browserScrollEnvironment(
     }),
   };
 }
+
+export const browserScrollEnvironment: ScrollEnvironment = createBrowserScrollEnvironment(document, window);

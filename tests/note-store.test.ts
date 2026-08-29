@@ -92,6 +92,26 @@ describe('NoteStore', () => {
     })]);
   });
 
+  it('keeps the strongest count evidence while allowing later equally strong values', () => {
+    const numeric = new NoteStore();
+    numeric.addMany([note({ id: 'count', likes: { raw: '12', value: 12 } })]);
+    numeric.addMany([note({ id: 'count', likes: { raw: '隐藏', value: null } })]);
+    numeric.addMany([note({ id: 'count', likes: { raw: 'not-a-count', value: null } })]);
+    expect(numeric.values()[0]?.likes).toEqual({ raw: '12', value: 12 });
+    numeric.addMany([note({ id: 'count', likes: { raw: '13', value: 13 } })]);
+    expect(numeric.values()[0]?.likes).toEqual({ raw: '13', value: 13 });
+
+    const hidden = new NoteStore();
+    hidden.addMany([note({ id: 'hidden', likes: { raw: '隐藏', value: null } })]);
+    hidden.addMany([note({ id: 'hidden', likes: { raw: '8', value: 8 } })]);
+    expect(hidden.values()[0]?.likes).toEqual({ raw: '8', value: 8 });
+
+    const empty = new NoteStore();
+    empty.addMany([note({ id: 'empty', likes: { raw: '', value: null } })]);
+    empty.addMany([note({ id: 'empty', likes: { raw: 'not-a-count', value: null } })]);
+    expect(empty.values()[0]?.likes).toEqual({ raw: 'not-a-count', value: null });
+  });
+
   it('skips records without a safe ID or valid xiaohongshu URL', () => {
     const store = new NoteStore();
 

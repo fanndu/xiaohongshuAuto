@@ -39,8 +39,11 @@ function clone(note: NoteRecord): NoteRecord {
   };
 }
 
-function hasCount(value: CountValue): boolean {
-  return Boolean(value.raw);
+function countStrength(value: CountValue): number {
+  if (value.value !== null) return 3;
+  if (value.raw === '隐藏') return 2;
+  if (value.raw) return 1;
+  return 0;
 }
 
 function strongestType(left: NoteType, right: NoteType): NoteType {
@@ -118,7 +121,9 @@ export class NoteStore {
       noteUrl: existing.noteUrl || later.noteUrl,
       title: later.title || existing.title,
       type: strongestType(existing.type, later.type),
-      likes: hasCount(later.likes) ? { ...later.likes } : { ...existing.likes },
+      likes: countStrength(later.likes) >= countStrength(existing.likes)
+        ? { ...later.likes }
+        : { ...existing.likes },
       coverUrl: later.coverUrl || existing.coverUrl,
       exportNotes: [...new Set([...existing.exportNotes, ...later.exportNotes])],
     };
