@@ -335,4 +335,47 @@ describe('parseStructuredPage', () => {
     expect(result.profile?.accountName).toBe('有界遍历');
     expect(result.notes).toEqual([]);
   });
+
+  it('ignores a shape-valid marker embedded in a regex after the real assignment', () => {
+    const real = {
+      user: { userPageData: { basicInfo: { nickname: '真实正则前状态' }, interactions: [], notes: [] } },
+    };
+    const regexFake = JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '正则伪状态' }, interactions: [], notes: [] } },
+    });
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(real)};`,
+      `const matcher = /window.__INITIAL_STATE__ = ${regexFake}/;</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('真实正则前状态');
+  });
+
+  it('ignores regex markers with escaped slashes and character classes', () => {
+    const real = {
+      user: { userPageData: { basicInfo: { nickname: '复杂正则后状态' }, interactions: [], notes: [] } },
+    };
+    const regexFake = JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '复杂正则伪状态' }, interactions: [], notes: [] } },
+    });
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(real)};`,
+      'const matcher = /[\\/\\]]escaped\\/slash',
+      `window.__INITIAL_STATE__ = ${regexFake}[brackets]/gi;</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('复杂正则后状态');
+  });
+
+  it('recognizes a real assignment after an ordinary division expression', () => {
+    const real = {
+      user: { userPageData: { basicInfo: { nickname: '除法后状态' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      '<script>const quotient = 10 / 2;',
+      `window.__INITIAL_STATE__ = ${JSON.stringify(real)};</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('除法后状态');
+  });
 });

@@ -2,12 +2,15 @@ import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize
 import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 
 type JsonRecord = Record<string, unknown>;
-type LexicalMode = 'code' | 'single-quote' | 'double-quote' | 'template' | 'line-comment' | 'block-comment';
+type LexicalMode = 'code' | 'single-quote' | 'double-quote' | 'template' | 'regex' | 'line-comment' | 'block-comment';
 
 const MAX_SCRIPT_CHARS = 5_000_000;
 const MAX_NOTE_DEPTH = 64;
 const MAX_NOTE_VISITS = 10_000;
 const MAX_NOTE_RECORDS = 10_000;
+const REGEX_PREFIX_KEYWORDS = new Set([
+  'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new', 'return', 'throw', 'typeof', 'void', 'yield',
+]);
 
 export interface StructuredPageResult {
   profile: Partial<ProfileRecord> | null;
@@ -18,6 +21,9 @@ const record = (value: unknown): JsonRecord | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : null;
 
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
+
+const identifierStart = (value: string): boolean => /[A-Za-z_$]/.test(value);
+const identifierPart = (value: string): boolean => /[A-Za-z0-9_$]/.test(value);
 
 function hasUserPageData(value: unknown): boolean {
   return record(record(record(value)?.user)?.userPageData) !== null;
@@ -107,6 +113,8 @@ function readInitialState(doc: Document): unknown {
 
     let mode: LexicalMode = 'code';
     let escaped = false;
+    let regexCharacterClass = false;
+    let canStartRegex = true;
     for (let index = 0; index < text.length; index += 1) {
       const char = text[index] ?? '';
       const next = text[index + 1] ?? '';
@@ -121,12 +129,27 @@ function readInitialState(doc: Document): unknown {
         }
         continue;
       }
+      if (mode === 'regex') {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (regexCharacterClass && char === ']') regexCharacterClass = false;
+        else if (!regexCharacterClass && char === '[') regexCharacterClass = true;
+        else if (!regexCharacterClass && char === '/') {
+          while (/[A-Za-z]/.test(text[index + 1] ?? '')) index += 1;
+          mode = 'code';
+          canStartRegex = false;
+        }
+        continue;
+      }
       if (mode !== 'code') {
         if (escaped) escaped = false;
         else if (char === '\\') escaped = true;
         else if ((mode === 'single-quote' && char === "'")
           || (mode === 'double-quote' && char === '"')
-          || (mode === 'template' && char === '`')) mode = 'code';
+          || (mode === 'template' && char === '`')) {
+          mode = 'code';
+          canStartRegex = false;
+        }
         continue;
       }
       if (char === "'") {
@@ -151,19 +174,56 @@ function readInitialState(doc: Document): unknown {
         index += 1;
         continue;
       }
-      if (!text.startsWith(marker, index)) continue;
-
-      let equalsIndex = index + marker.length;
-      while (/\s/.test(text[equalsIndex] ?? '')) equalsIndex += 1;
-      if (text[equalsIndex] !== '=') continue;
-      const source = assignedJson(text, equalsIndex + 1);
-      if (!source) continue;
-      try {
-        const candidate = JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
-        if (hasUserPageData(candidate)) latestState = candidate;
-      } catch {
-        // A later assignment can still be valid, so keep scanning this and later scripts.
+      if (char === '/' && canStartRegex) {
+        mode = 'regex';
+        escaped = false;
+        regexCharacterClass = false;
+        continue;
       }
+      if (char === '/') {
+        canStartRegex = true;
+        continue;
+      }
+      if (text.startsWith(marker, index)) {
+        let equalsIndex = index + marker.length;
+        while (/\s/.test(text[equalsIndex] ?? '')) equalsIndex += 1;
+        if (text[equalsIndex] === '=') {
+          const source = assignedJson(text, equalsIndex + 1);
+          if (source) {
+            try {
+              const candidate = JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
+              if (hasUserPageData(candidate)) latestState = candidate;
+            } catch {
+              // A later assignment can still be valid, so keep scanning this and later scripts.
+            }
+          }
+        }
+        continue;
+      }
+      if (identifierStart(char)) {
+        let end = index + 1;
+        while (identifierPart(text[end] ?? '')) end += 1;
+        canStartRegex = REGEX_PREFIX_KEYWORDS.has(text.slice(index, end));
+        index = end - 1;
+        continue;
+      }
+      if (/\d/.test(char)) {
+        let end = index + 1;
+        while (/[A-Za-z0-9_.]/.test(text[end] ?? '')) end += 1;
+        canStartRegex = false;
+        index = end - 1;
+        continue;
+      }
+      if (char === ')' || char === ']' || char === '}' || char === '.') {
+        canStartRegex = false;
+        continue;
+      }
+      if ((char === '+' || char === '-') && char === next) {
+        canStartRegex = false;
+        index += 1;
+        continue;
+      }
+      if ('([{,;:?=!*%&|^<>~+-'.includes(char)) canStartRegex = true;
     }
   }
   return latestState;
