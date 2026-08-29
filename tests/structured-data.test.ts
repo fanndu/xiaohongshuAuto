@@ -171,4 +171,130 @@ describe('parseStructuredPage', () => {
       notes: [],
     });
   });
+
+  it('ignores marker-shaped text in strings, templates, and comments', () => {
+    const valid = {
+      user: { userPageData: { basicInfo: { nickname: '真实状态' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      '<script>',
+      'const quoted = \'window.__INITIAL_STATE__ = {"user": {}}\';',
+      'const templated = `window.__INITIAL_STATE__ = {"user": {}}`;',
+      '// window.__INITIAL_STATE__ = {"user": {}}',
+      '/* window.__INITIAL_STATE__ = {"user": {}} */',
+      `window.__INITIAL_STATE__ = ${JSON.stringify(valid)};`,
+      '</script>',
+    ].join('\n');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('真实状态');
+  });
+
+  it('continues after malformed candidates in a script and later scripts', () => {
+    const valid = {
+      user: { userPageData: { basicInfo: { nickname: '后续有效状态' }, interactions: [], notes: [] } },
+    };
+    document.body.innerHTML = [
+      '<script>window.__INITIAL_STATE__ = {broken; window.__INITIAL_STATE__ = {also: broken;</script>',
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`,
+    ].join('');
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('后续有效状态');
+  });
+
+  it('rejects conflicting explicit and supplied note identities', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { basicInfo: {}, interactions: [], notes: [{
+        id: 'supplied-id', url: 'https://www.xiaohongshu.com/explore/url-id',
+      }] } },
+    })};</script>`;
+
+    expect(parseStructuredPage(document, location.href).notes).toEqual([]);
+  });
+
+  it('falls back from an on-domain non-note URL when a safe supplied id exists', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { basicInfo: {}, interactions: [], notes: [{
+        id: 'safe-id', url: 'https://www.xiaohongshu.com/user/profile/user-id',
+      }] } },
+    })};</script>`;
+
+    expect(parseStructuredPage(document, location.href).notes).toMatchObject([{
+      id: 'safe-id', noteUrl: 'https://www.xiaohongshu.com/explore/safe-id',
+    }]);
+  });
+
+  it('uses later usable values when preferred mapping fields are empty or non-strings', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { basicInfo: {}, interactions: [], notes: [{
+        id: '',
+        noteId: 'fallback-id',
+        displayTitle: 12,
+        title: '后备标题',
+        interactInfo: { likedCount: '' },
+        likedCount: '19',
+        cover: { urlDefault: '', urlPre: 'https://img.example/pre.jpg' },
+        coverUrl: 'https://img.example/scalar.jpg',
+      }] } },
+    })};</script>`;
+
+    expect(parseStructuredPage(document, location.href).notes).toMatchObject([{
+      id: 'fallback-id',
+      title: '后备标题',
+      likes: { raw: '19', value: 19 },
+      coverUrl: 'https://img.example/pre.jpg',
+    }]);
+  });
+
+  it('bounds traversal without overflowing and preserves a parsed profile', () => {
+    let deeplyNested: unknown = [{ id: 'too-deep', title: '不应出现' }];
+    for (let depth = 0; depth < 5_000; depth += 1) deeplyNested = [deeplyNested];
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '保留资料' }, interactions: [], notes: deeplyNested } },
+    })};</script>`;
+
+    const result = parseStructuredPage(document, location.href);
+    expect(result.profile?.accountName).toBe('保留资料');
+    expect(result.notes).toEqual([]);
+  });
+
+  it('truncates excessive notes and skips oversized state scripts', () => {
+    const notes = Array.from({ length: 10_001 }, (_, index) => ({ id: `item-${index}` }));
+    const bounded = {
+      user: { userPageData: { basicInfo: { nickname: '有界资料' }, interactions: [], notes } },
+    };
+    const later = {
+      user: { userPageData: { basicInfo: { nickname: '稍后资料' }, interactions: [], notes: [] } },
+    };
+    const oversized = JSON.stringify({
+      user: { userPageData: { basicInfo: { nickname: '应跳过' }, interactions: [], notes: [] } },
+    }) + ' '.repeat(5_000_001);
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(bounded)};</script>`,
+      `<script>window.__INITIAL_STATE__ = ${oversized};</script>`,
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(later)};</script>`,
+    ].join('');
+
+    const boundedResult = parseStructuredPage(document, location.href);
+    expect(boundedResult.notes).toHaveLength(10_000);
+    expect(boundedResult.notes[0]?.id).toBe('item-0');
+    expect(boundedResult.notes[9_999]?.id).toBe('item-9999');
+    document.body.innerHTML = [
+      `<script>window.__INITIAL_STATE__ = ${oversized};</script>`,
+      `<script>window.__INITIAL_STATE__ = ${JSON.stringify(later)};</script>`,
+    ].join('');
+    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('稍后资料');
+  });
+
+  it('keeps escaped delimiters and literal undefined strings intact', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = {
+      "user": {"userPageData": {
+        "basicInfo": {"nickname": "quote \\" } ] undefined"},
+        "interactions": [],
+        "notes": []
+      }}
+    };</script>`;
+
+    expect(parseStructuredPage(document, location.href).profile?.accountName)
+      .toBe('quote " } ] undefined');
+  });
 });

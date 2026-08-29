@@ -2,6 +2,11 @@ import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize
 import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
 
 type JsonRecord = Record<string, unknown>;
+type LexicalMode = 'code' | 'single-quote' | 'double-quote' | 'template' | 'line-comment' | 'block-comment';
+
+const MAX_SCRIPT_CHARS = 5_000_000;
+const MAX_NOTE_DEPTH = 64;
+const MAX_NOTE_ITEMS = 10_000;
 
 export interface StructuredPageResult {
   profile: Partial<ProfileRecord> | null;
@@ -13,8 +18,13 @@ const record = (value: unknown): JsonRecord | null =>
 
 const string = (value: unknown): string => typeof value === 'string' ? value.trim() : '';
 
-const flattenNotes = (value: unknown): unknown[] =>
-  Array.isArray(value) ? value.flatMap(item => Array.isArray(item) ? flattenNotes(item) : [item]) : [];
+function firstString(...values: unknown[]): string {
+  for (const value of values) {
+    const result = string(value);
+    if (result) return result;
+  }
+  return '';
+}
 
 function assignedJson(text: string, start: number): string | null {
   let index = start;
@@ -49,19 +59,19 @@ function assignedJson(text: string, start: number): string | null {
 
 function replaceUndefinedPropertyValues(source: string): string {
   let output = '';
-  let quote = '';
+  let inString = false;
   let escaped = false;
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index] ?? '';
-    if (quote) {
+    if (inString) {
       output += char;
       if (escaped) escaped = false;
       else if (char === '\\') escaped = true;
-      else if (char === quote) quote = '';
+      else if (char === '"') inString = false;
       continue;
     }
-    if (char === '"' || char === "'") {
-      quote = char;
+    if (char === '"') {
+      inString = true;
       output += char;
       continue;
     }
@@ -87,23 +97,91 @@ function readInitialState(doc: Document): unknown {
   const marker = 'window.__INITIAL_STATE__';
   for (const script of doc.querySelectorAll('script')) {
     const text = script.textContent ?? '';
-    let markerIndex = text.indexOf(marker);
-    while (markerIndex >= 0) {
-      let equalsIndex = markerIndex + marker.length;
-      while (/\s/.test(text[equalsIndex] ?? '')) equalsIndex += 1;
-      if (text[equalsIndex] === '=') {
-        const source = assignedJson(text, equalsIndex + 1);
-        if (!source) return null;
-        try {
-          return JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
-        } catch {
-          return null;
-        }
+    if (text.length > MAX_SCRIPT_CHARS) continue;
+
+    let mode: LexicalMode = 'code';
+    let escaped = false;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index] ?? '';
+      const next = text[index + 1] ?? '';
+      if (mode === 'line-comment') {
+        if (char === '\n' || char === '\r') mode = 'code';
+        continue;
       }
-      markerIndex = text.indexOf(marker, markerIndex + marker.length);
+      if (mode === 'block-comment') {
+        if (char === '*' && next === '/') {
+          mode = 'code';
+          index += 1;
+        }
+        continue;
+      }
+      if (mode !== 'code') {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if ((mode === 'single-quote' && char === "'")
+          || (mode === 'double-quote' && char === '"')
+          || (mode === 'template' && char === '`')) mode = 'code';
+        continue;
+      }
+      if (char === "'") {
+        mode = 'single-quote';
+        continue;
+      }
+      if (char === '"') {
+        mode = 'double-quote';
+        continue;
+      }
+      if (char === '`') {
+        mode = 'template';
+        continue;
+      }
+      if (char === '/' && next === '/') {
+        mode = 'line-comment';
+        index += 1;
+        continue;
+      }
+      if (char === '/' && next === '*') {
+        mode = 'block-comment';
+        index += 1;
+        continue;
+      }
+      if (!text.startsWith(marker, index)) continue;
+
+      let equalsIndex = index + marker.length;
+      while (/\s/.test(text[equalsIndex] ?? '')) equalsIndex += 1;
+      if (text[equalsIndex] !== '=') continue;
+      const source = assignedJson(text, equalsIndex + 1);
+      if (!source) continue;
+      try {
+        return JSON.parse(replaceUndefinedPropertyValues(source)) as unknown;
+      } catch {
+        // A later assignment can still be valid, so keep scanning this and later scripts.
+      }
     }
   }
   return null;
+}
+
+function flattenNotes(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return [];
+
+  const flattened: unknown[] = [];
+  const pending: Array<{ values: unknown[]; index: number; depth: number }> = [
+    { values: value, index: 0, depth: 0 },
+  ];
+  while (pending.length > 0 && flattened.length < MAX_NOTE_ITEMS) {
+    const current = pending[pending.length - 1];
+    if (!current) break;
+    if (current.depth >= MAX_NOTE_DEPTH || current.index >= current.values.length) {
+      pending.pop();
+      continue;
+    }
+    const child = current.values[current.index];
+    current.index += 1;
+    if (Array.isArray(child)) pending.push({ values: child, index: 0, depth: current.depth + 1 });
+    else flattened.push(child);
+  }
+  return flattened;
 }
 
 function noteType(value: unknown): NoteType {
@@ -120,57 +198,63 @@ function mapNote(value: unknown): NoteRecord | null {
   const source = record(value);
   if (!source) return null;
 
+  const suppliedId = firstString(source.id, source.noteId);
   const explicitUrl = normalizeNoteUrl(string(source.url));
-  const sourceId = string(source.id ?? source.noteId);
-  const id = sourceId || extractNoteId(explicitUrl);
-  // An off-domain or malformed explicit URL falls back only when the state supplies a note id.
-  const noteUrl = explicitUrl || generatedNoteUrl(id);
-  if (!noteUrl || !id) return null;
+  const explicitId = extractNoteId(explicitUrl);
+  if (suppliedId && explicitId && suppliedId !== explicitId) return null;
+
+  const id = suppliedId || explicitId;
+  const noteUrl = explicitId ? explicitUrl : generatedNoteUrl(suppliedId);
+  if (!id || !noteUrl || extractNoteId(noteUrl) !== id) return null;
 
   const cover = record(source.cover);
   const interactInfo = record(source.interactInfo);
   return {
     id,
-    title: string(source.displayTitle ?? source.title),
+    title: firstString(source.displayTitle, source.title),
     noteUrl,
     type: noteType(source.type),
-    likes: parseCount(string(interactInfo?.likedCount ?? source.likedCount)),
-    coverUrl: string(cover?.urlDefault ?? cover?.urlPre ?? source.coverUrl),
+    likes: parseCount(firstString(interactInfo?.likedCount, source.likedCount)),
+    coverUrl: firstString(cover?.urlDefault, cover?.urlPre, source.coverUrl),
     exportNotes: [],
   };
 }
 
+function safelyMapNote(value: unknown): NoteRecord | null {
+  try {
+    return mapNote(value);
+  } catch {
+    return null;
+  }
+}
+
 export function parseStructuredPage(doc: Document, profileUrl: string): StructuredPageResult {
   const state = readInitialState(doc);
-  try {
-    const page = record(record(state)?.user);
-    const userPageData = record(page?.userPageData);
-    if (!userPageData) return { profile: null, notes: [] };
+  const page = record(record(state)?.user);
+  const userPageData = record(page?.userPageData);
+  if (!userPageData) return { profile: null, notes: [] };
 
-    const basic = record(userPageData.basicInfo) ?? {};
-    const interactions = Array.isArray(userPageData.interactions)
-      ? userPageData.interactions.map(record).filter((item): item is JsonRecord => item !== null)
-      : [];
-    const countFor = (type: string) => parseCount(string(interactions.find(item => item.type === type)?.count));
+  const basic = record(userPageData.basicInfo) ?? {};
+  const interactions = Array.isArray(userPageData.interactions)
+    ? userPageData.interactions.map(record).filter((item): item is JsonRecord => item !== null)
+    : [];
+  const countFor = (type: string) => parseCount(string(interactions.find(item => item.type === type)?.count));
 
-    return {
-      profile: {
-        profileUrl,
-        accountName: string(basic.nickname),
-        redId: string(basic.redId),
-        avatarUrl: string(basic.imageb) || string(basic.images),
-        description: string(basic.desc),
-        ipLocation: string(basic.ipLocation),
-        following: countFor('follows'),
-        followers: countFor('fans'),
-        likedAndCollected: countFor('interaction'),
-        exportNotes: [],
-      },
-      notes: flattenNotes(userPageData.notes)
-        .map(mapNote)
-        .filter((item): item is NoteRecord => item !== null),
-    };
-  } catch {
-    return { profile: null, notes: [] };
-  }
+  return {
+    profile: {
+      profileUrl,
+      accountName: string(basic.nickname),
+      redId: string(basic.redId),
+      avatarUrl: firstString(basic.imageb, basic.images),
+      description: string(basic.desc),
+      ipLocation: string(basic.ipLocation),
+      following: countFor('follows'),
+      followers: countFor('fans'),
+      likedAndCollected: countFor('interaction'),
+      exportNotes: [],
+    },
+    notes: flattenNotes(userPageData.notes)
+      .map(safelyMapNote)
+      .filter((item): item is NoteRecord => item !== null),
+  };
 }
