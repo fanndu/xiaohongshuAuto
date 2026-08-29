@@ -8,7 +8,6 @@ type JsonRecord = Record<string, unknown>;
 const MAX_SCRIPT_CHARS = 5_000_000;
 const MAX_CANDIDATE_SCRIPTS = 32;
 const MAX_CANDIDATE_SCRIPT_CHARS = 8_000_000;
-const INITIAL_STATE_MARKER = 'window.__INITIAL_STATE__';
 const MAX_NOTE_DEPTH = 64;
 const MAX_NOTE_VISITS = 10_000;
 const MAX_NOTE_RECORDS = 10_000;
@@ -16,6 +15,9 @@ const MAX_NOTE_RECORDS = 10_000;
 export interface StructuredPageResult {
   /** Explicit, stable page identity. Never inferred from a red ID or display name. */
   userId: string;
+  identityStatus: 'missing' | 'valid' | 'conflict' | 'budget_exhausted';
+  hasProfileEvidence: boolean;
+  hasNotesContainer: boolean;
   profile: Partial<ProfileRecord> | null;
   notes: NoteRecord[];
 }
@@ -166,27 +168,81 @@ function lastStateFromScript(source: string): unknown {
   return latest?.state ?? null;
 }
 
-function readInitialState(doc: Document): unknown {
-  let latestState: unknown = null;
-  let candidateCount = 0;
+function skipQuoted(source: string, start: number, quote: string): number {
+  let index = start + 1;
+  while (index < source.length) {
+    if (source[index] === '\\') index += 2;
+    else if (source[index] === quote) return index + 1;
+    else index += 1;
+  }
+  return source.length;
+}
+
+function skipRegex(source: string, start: number): number {
+  let index = start + 1;
+  let inClass = false;
+  while (index < source.length) {
+    const char = source[index] ?? '';
+    if (char === '\\') index += 2;
+    else if (char === '[') { inClass = true; index += 1; }
+    else if (char === ']') { inClass = false; index += 1; }
+    else if (char === '/' && !inClass) {
+      index += 1;
+      while (/[a-z]/i.test(source[index] ?? '')) index += 1;
+      return index;
+    } else if (/\r|\n/.test(char)) return start + 1;
+    else index += 1;
+  }
+  return start + 1;
+}
+
+/** Detects an assignment token outside quoted/comment/regex payloads without executing script text. */
+function hasInitialStateAssignment(source: string): boolean {
+  for (let index = 0; index < source.length;) {
+    const char = source[index] ?? '';
+    if (char === '"' || char === "'" || char === '`') { index = skipQuoted(source, index, char); continue; }
+    if (char === '/' && source[index + 1] === '/') {
+      const newline = source.indexOf('\n', index + 2);
+      index = newline === -1 ? source.length : newline + 1;
+      continue;
+    }
+    if (char === '/' && source[index + 1] === '*') {
+      const end = source.indexOf('*/', index + 2);
+      index = end === -1 ? source.length : end + 2;
+      continue;
+    }
+    if (char === '/') {
+      const end = skipRegex(source, index);
+      if (end > index + 1) { index = end; continue; }
+    }
+    if (source.startsWith('window', index)
+      && /^window\s*\.\s*__INITIAL_STATE__\s*=/.test(source.slice(index))) return true;
+    index += 1;
+  }
+  return false;
+}
+
+function readInitialState(doc: Document): { state: unknown; budgetExhausted: boolean } {
+  const candidates: Array<{ script: HTMLScriptElement; source: string }> = [];
   let candidateChars = 0;
   for (const script of doc.querySelectorAll('script')) {
     const source = script.textContent ?? '';
-    // Most page scripts are irrelevant. Avoid constructing an AST unless this exact marker occurs.
-    if (!source.includes(INITIAL_STATE_MARKER)) continue;
-    if (candidateCount >= MAX_CANDIDATE_SCRIPTS) break;
-    candidateCount += 1;
-    if (source.length > MAX_SCRIPT_CHARS) continue;
-    if (candidateChars + source.length > MAX_CANDIDATE_SCRIPT_CHARS) continue;
+    // Oversized decoys are skipped before they can consume either candidate budget.
+    if (source.length > MAX_SCRIPT_CHARS || !hasInitialStateAssignment(source)) continue;
+    if (candidates.length >= MAX_CANDIDATE_SCRIPTS || candidateChars + source.length > MAX_CANDIDATE_SCRIPT_CHARS) {
+      return { state: null, budgetExhausted: true };
+    }
     candidateChars += source.length;
-    const cached = scriptParseCache.get(script);
-    const state = cached?.source === source
-      ? cached.state
-      : lastStateFromScript(source);
-    if (!cached || cached.source !== source) scriptParseCache.set(script, { source, state });
-    if (state !== null) latestState = state;
+    candidates.push({ script, source });
   }
-  return latestState;
+  // Newest candidate wins; an invalid newest assignment falls back to an earlier valid one.
+  for (const { script, source } of candidates.reverse()) {
+    const cached = scriptParseCache.get(script);
+    const state = cached?.source === source ? cached.state : lastStateFromScript(source);
+    if (!cached || cached.source !== source) scriptParseCache.set(script, { source, state });
+    if (state !== null) return { state, budgetExhausted: false };
+  }
+  return { state: null, budgetExhausted: false };
 }
 
 function flattenNotes(value: unknown): unknown[] {
@@ -225,7 +281,7 @@ function generatedNoteUrl(id: string): string {
 }
 
 function mapNote(value: unknown): NoteRecord | null {
-  const source = record(value);
+  const source = record(record(value)?.noteCard) ?? record(value);
   if (!source) return null;
 
   const suppliedId = firstString(source.id, source.noteId);
@@ -259,32 +315,44 @@ function safelyMapNote(value: unknown): NoteRecord | null {
 }
 
 export function parseStructuredPage(doc: Document, profileUrl: string): StructuredPageResult {
-  const state = readInitialState(doc);
-  const page = record(record(state)?.user);
+  const read = readInitialState(doc);
+  const page = record(record(read.state)?.user);
   const userPageData = record(page?.userPageData);
-  if (!userPageData) return { userId: '', profile: null, notes: [] };
+  if (!userPageData) return {
+    userId: '', identityStatus: read.budgetExhausted ? 'budget_exhausted' : 'missing',
+    hasProfileEvidence: false, hasNotesContainer: false, profile: null, notes: [],
+  };
 
-  const basic = record(userPageData.basicInfo) ?? {};
+  const basic = record(userPageData.basicInfo);
   const interactions = Array.isArray(userPageData.interactions)
     ? userPageData.interactions.map(record).filter((item): item is JsonRecord => item !== null)
     : [];
   const countFor = (type: string) => parseCount(string(interactions.find(item => item.type === type)?.count));
 
+  const identities = new Set([basic?.userId, userPageData.userId, page?.userId].map(string).filter(Boolean));
+  const identityStatus = read.budgetExhausted ? 'budget_exhausted'
+    : identities.size > 1 ? 'conflict' : identities.size === 1 ? 'valid' : 'missing';
+  const userId = identityStatus === 'valid' ? [...identities][0] ?? '' : '';
+  const noteContainers = [userPageData.notes, page?.notes].filter(Array.isArray);
   return {
-    userId: firstString(basic.userId, userPageData.userId, page?.userId),
+    userId,
+    identityStatus,
+    hasProfileEvidence: Boolean(basic && (string(basic.nickname) || string(basic.redId)
+      || firstString(basic.imageb, basic.images))),
+    hasNotesContainer: noteContainers.length > 0,
     profile: {
       profileUrl,
-      accountName: string(basic.nickname),
-      redId: string(basic.redId),
-      avatarUrl: firstString(basic.imageb, basic.images),
-      description: string(basic.desc),
-      ipLocation: string(basic.ipLocation),
+      accountName: string(basic?.nickname),
+      redId: string(basic?.redId),
+      avatarUrl: firstString(basic?.imageb, basic?.images),
+      description: string(basic?.desc),
+      ipLocation: string(basic?.ipLocation),
       following: countFor('follows'),
       followers: countFor('fans'),
       likedAndCollected: countFor('interaction'),
       exportNotes: [],
     },
-    notes: flattenNotes(userPageData.notes)
+    notes: noteContainers.flatMap(flattenNotes)
       .map(safelyMapNote)
       .filter((item): item is NoteRecord => item !== null),
   };

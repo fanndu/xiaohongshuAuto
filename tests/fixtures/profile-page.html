@@ -31,7 +31,8 @@
         }
       };
     </script>
-    <main class="user">
+    <section class="user" data-user-id="azhe">
+      <a data-testid="profile-self-link" href="/user/profile/azhe">主页</a>
       <img class="user-avatar" src="https://img.example/avatar.jpg" alt="旅行摄影阿哲">
       <h1 class="user-name">旅行摄影阿哲</h1>
       <p class="user-redId">小红书号：xhs_azhe</p>
@@ -42,7 +43,7 @@
         <div class="data-item"><span class="count">1.2万</span><span>粉丝</span></div>
         <div class="data-item"><span class="count">8.6万</span><span>获赞与收藏</span></div>
       </div>
-      <section class="feeds-page">
+      <section class="feeds-page" data-testid="profile-notes">
         <article class="note-item">
           <img class="author-avatar" src="https://img.example/author.jpg" alt="作者头像">
           <a class="cover" href="/explore/abc123?xsec_token=secret">
@@ -53,6 +54,6 @@
           <span class="video-icon" aria-label="视频"></span>
         </article>
       </section>
-    </main>
+    </section>
   </body>
 </html>

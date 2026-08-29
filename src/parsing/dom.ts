@@ -1,5 +1,17 @@
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
+import { canonicalProfileRoute } from '../domain/routes';
 import type { NoteRecord, ProfileRecord } from '../domain/types';
+
+export type PageIdentityStatus = 'missing' | 'valid' | 'conflict';
+
+export interface DomPageResult {
+  userId: string;
+  identityStatus: PageIdentityStatus;
+  hasProfileEvidence: boolean;
+  hasWorksContainer: boolean;
+  profile: Partial<ProfileRecord>;
+  notes: NoteRecord[];
+}
 
 const text = (element: Element | null): string => (element?.textContent ?? '').trim();
 const normalizedText = (element: Element): string => text(element).replace(/\s+/g, '');
@@ -118,8 +130,13 @@ function statRaw(doc: Document, label: string): string {
   return '';
 }
 
+function worksContainer(doc: Document): Element | null {
+  return doc.querySelector('[data-testid="profile-notes"], [data-testid="works-container"], section.feeds-page');
+}
+
 function noteCards(doc: Document): Element[] {
-  return [...doc.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')];
+  const root = worksContainer(doc) ?? doc;
+  return [...root.querySelectorAll('.note-item, [class*="note-item"], section.feeds-page article')];
 }
 
 function noteLinks(card: Element, base: string): Array<{ id: string; noteUrl: string }> {
@@ -150,27 +167,28 @@ function mapNote(card: Element, base: string): NoteRecord | null {
   const link = links[0];
   if (!link) return null;
 
-  const videoMarker = card.matches('[data-note-type="video"], [data-testid="video"], [aria-label*="视频"]')
-    || card.querySelector([
-    'video',
-    '[data-testid="video"]',
-    '[data-note-type="video"]',
-    '[class~="video-icon"]',
-    '[aria-label*="视频"]',
-  ].join(','));
-  const imageMarker = card.matches('[data-note-type="image"], [data-testid="image"], [aria-label*="图文"]')
-    || card.querySelector([
-      '[data-testid="image"]',
-      '[data-note-type="image"]',
-      '[class~="image-icon"]',
-      '[aria-label*="图文"]',
-    ].join(','));
+  const hasMarker = (type: 'image' | 'video'): boolean => {
+    const expectedAria = type === 'video' ? '视频' : '图文';
+    const exactAria = card.getAttribute('aria-label')?.trim() === expectedAria
+      || [...card.querySelectorAll('[aria-label]')].some(element =>
+        element.getAttribute('aria-label')?.trim() === expectedAria);
+    return card.matches(`[data-note-type="${type}"], [data-testid="${type}"]`)
+      || Boolean(card.querySelector([
+        `[data-testid="${type}"]`,
+        `[data-note-type="${type}"]`,
+        `[class~="${type}-icon"]`,
+      ].join(',')))
+      || (type === 'video' && Boolean(card.querySelector('video')))
+      || exactAria;
+  };
+  const videoMarker = hasMarker('video');
+  const imageMarker = hasMarker('image');
   return {
     id: link.id,
     title: firstText(card, ['[data-testid="note-title"]', '.title', '[class*="title"]', 'h2', 'h3']),
     noteUrl: link.noteUrl,
     // Covers are common to video and image posts, so an <img> is not type evidence.
-    type: videoMarker ? 'video' : imageMarker ? 'image' : 'unknown',
+    type: videoMarker === imageMarker ? 'unknown' : videoMarker ? 'video' : 'image',
     likes: parseCount(likesRaw(card)),
     coverUrl: imageUrl(card, ['a.cover img', 'img'], base),
     exportNotes: [],
@@ -231,17 +249,36 @@ function profileRoot(doc: Document): ParentNode {
 
 /** A DOM fallback is safe only when it looks like a real profile, not a generic page fragment. */
 export function isRecognizedDomProfile(doc: Document): boolean {
+  const page = parseDomPage(doc, location.href);
+  return page.identityStatus === 'valid' && page.hasProfileEvidence && page.hasWorksContainer;
+}
+
+function domIdentity(doc: Document, base: string): { userId: string; identityStatus: PageIdentityStatus } {
   const root = profileRootElement(doc);
-  if (!root) return false;
-  const profile = parseDomPage(doc, location.href);
-  return Boolean(profile.profile.accountName || profile.profile.redId || profile.profile.avatarUrl);
+  if (!root) return { userId: '', identityStatus: 'missing' };
+  const values = new Set<string>();
+  for (const attribute of ['data-user-id', 'data-userid', 'data-profile-user-id']) {
+    const value = root.getAttribute(attribute)?.trim() ?? '';
+    if (value) values.add(value);
+  }
+  for (const anchor of root.querySelectorAll('a[href*="/user/profile/"]')) {
+    try {
+      const route = canonicalProfileRoute(new URL(anchor.getAttribute('href') ?? '', base).href);
+      if (route) values.add(route.key);
+    } catch {
+      // Malformed links are not identity evidence.
+    }
+  }
+  if (values.size !== 1) return { userId: '', identityStatus: values.size ? 'conflict' : 'missing' };
+  return { userId: [...values][0] ?? '', identityStatus: 'valid' };
 }
 
 export function parseDomPage(
   doc: Document,
   profileUrl: string,
-): { profile: Partial<ProfileRecord>; notes: NoteRecord[] } {
+): DomPageResult {
   const root = profileRoot(doc);
+  const identity = domIdentity(doc, profileUrl);
   const rawRedId = firstText(root, [
     '[data-testid="user-redId"]',
     '[data-testid="user-red-id"]',
@@ -258,39 +295,43 @@ export function parseDomPage(
     '.ip-location',
   ]);
 
+  const profile = {
+    profileUrl,
+    accountName: firstText(root, [
+      '[data-testid="user-name"]',
+      '[data-testid="nickname"]',
+      '.user-name',
+      '.nickname',
+    ]),
+    redId: stripLabel(rawRedId, '小红书号'),
+    avatarUrl: imageUrl(root, [
+      'img[data-testid="user-avatar"]',
+      '[data-testid="user-avatar"] img',
+      'img[data-testid="avatar"]',
+      '[data-testid="avatar"] img',
+      'img.user-avatar',
+      '.user-avatar img',
+      'img[class*="avatar"]',
+      '[class*="avatar"] img',
+    ], profileUrl),
+    description: firstText(root, [
+      '[data-testid="user-desc"]',
+      '[data-testid="description"]',
+      '.user-desc',
+      '.desc',
+      '[class*="user-desc"]',
+    ]),
+    ipLocation: stripLabel(rawIpLocation, 'IP属地'),
+    following: parseCount(statRaw(doc, '关注')),
+    followers: parseCount(statRaw(doc, '粉丝')),
+    likedAndCollected: parseCount(statRaw(doc, '获赞与收藏')),
+    exportNotes: [],
+  };
   return {
-    profile: {
-      profileUrl,
-      accountName: firstText(root, [
-        '[data-testid="user-name"]',
-        '[data-testid="nickname"]',
-        '.user-name',
-        '.nickname',
-      ]),
-      redId: stripLabel(rawRedId, '小红书号'),
-      avatarUrl: imageUrl(root, [
-        'img[data-testid="user-avatar"]',
-        '[data-testid="user-avatar"] img',
-        'img[data-testid="avatar"]',
-        '[data-testid="avatar"] img',
-        'img.user-avatar',
-        '.user-avatar img',
-        'img[class*="avatar"]',
-        '[class*="avatar"] img',
-      ], profileUrl),
-      description: firstText(root, [
-        '[data-testid="user-desc"]',
-        '[data-testid="description"]',
-        '.user-desc',
-        '.desc',
-        '[class*="user-desc"]',
-      ]),
-      ipLocation: stripLabel(rawIpLocation, 'IP属地'),
-      following: parseCount(statRaw(doc, '关注')),
-      followers: parseCount(statRaw(doc, '粉丝')),
-      likedAndCollected: parseCount(statRaw(doc, '获赞与收藏')),
-      exportNotes: [],
-    },
+    ...identity,
+    hasProfileEvidence: Boolean(profile.accountName || profile.redId || profile.avatarUrl),
+    hasWorksContainer: worksContainer(doc) !== null,
+    profile,
     notes: uniqueNotes(noteCards(doc), profileUrl),
   };
 }

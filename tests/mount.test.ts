@@ -12,7 +12,7 @@ describe('mountCollector', () => {
   it('rolls back a partially mounted control when initial rendering throws', () => {
     vi.spyOn(FloatingControl.prototype, 'render').mockImplementation(() => { throw new Error('render'); });
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
-      user: { userPageData: { userId: 'alice', basicInfo: {}, interactions: [], notes: [] } },
+      user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } },
     })};</script>`;
 
     expect(() => mountCollector('https://www.xiaohongshu.com/user/profile/alice')).toThrow('render');
@@ -40,7 +40,7 @@ describe('mountCollector', () => {
     expect(createControl).not.toHaveBeenCalled();
 
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
-      user: { userPageData: { userId: 'alice', basicInfo: {}, interactions: [], notes: [] } },
+      user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } },
     })};</script>`;
     const cleanup = mountCollector('https://www.xiaohongshu.com/user/profile/alice', undefined, { createControl });
     expect(createControl).toHaveBeenCalledOnce();
@@ -48,7 +48,7 @@ describe('mountCollector', () => {
   });
 
   it('accepts a recognized DOM-only zero-note profile when structured identity is absent', () => {
-    document.body.innerHTML = '<section data-testid="profile-header"><span data-testid="user-name">Alice</span></section>';
+    document.body.innerHTML = '<section data-testid="profile-header" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span data-testid="user-name">Alice</span><section data-testid="profile-notes"></section></section>';
     const control = { destroy: vi.fn(), render: vi.fn() };
     const cleanup = mountCollector('https://www.xiaohongshu.com/user/profile/alice', undefined, {
       createControl: () => control,
@@ -56,5 +56,42 @@ describe('mountCollector', () => {
 
     expect(control.render).toHaveBeenCalledWith({ phase: 'ready' });
     cleanup();
+  });
+
+  it('does not merge stale Alice DOM fields or notes into a current Bob structured profile', async () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [{ id: 'bob-note', title: 'Bob note' }] } },
+    })};</script><section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"><article class="note-item"><a href="/explore/alice-note"></a></article></section></section>`;
+    const control = { destroy: vi.fn(), render: vi.fn() };
+    const exported: Array<{ profile: { accountName: string }; notes: Array<{ id: string }> }> = [];
+    const cleanup = mountCollector('https://www.xiaohongshu.com/user/profile/bob', undefined, {
+      createControl: actions => Object.assign(control, { actions }),
+      environment: { atBottom: () => true, hasAccessBlock: () => false, scrollToBottom: () => undefined, wait: () => Promise.resolve() },
+      exportResult: async result => { exported.push(result); },
+    });
+    const actions = (control as typeof control & { actions: { start(): Promise<void> } }).actions;
+    await actions.start();
+    expect(exported).toEqual([{ profile: expect.objectContaining({ accountName: 'Bob' }), notes: [{ id: 'bob-note', title: 'Bob note', noteUrl: 'https://www.xiaohongshu.com/explore/bob-note', type: 'unknown', likes: { raw: '', value: null }, coverUrl: '', exportNotes: [] }] }]);
+    cleanup();
+  });
+
+  it('rejects identity-only structured state and stale structured plus DOM state', () => {
+    const createControl = vi.fn();
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userPageData: { userId: 'alice', basicInfo: {}, interactions: [], notes: [] } } })};</script>`;
+    expect(() => mountCollector('https://www.xiaohongshu.com/user/profile/alice', undefined, { createControl })).toThrow(ProfileDocumentNotReadyError);
+
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } } })};</script><section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"></section></section>`;
+    expect(() => mountCollector('https://www.xiaohongshu.com/user/profile/bob', undefined, { createControl })).toThrow(ProfileDocumentNotReadyError);
+    expect(createControl).not.toHaveBeenCalled();
+  });
+
+  it('rejects conflicting structured aliases and a mismatched DOM-only profile', () => {
+    const createControl = vi.fn();
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: { userId: 'alice', userPageData: { userId: 'alice', basicInfo: { userId: 'bob', nickname: 'Bob' }, interactions: [], notes: [] } } })};</script>`;
+    expect(() => mountCollector('https://www.xiaohongshu.com/user/profile/bob', undefined, { createControl })).toThrow(ProfileDocumentNotReadyError);
+
+    document.body.innerHTML = '<section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"></section></section>';
+    expect(() => mountCollector('https://www.xiaohongshu.com/user/profile/bob', undefined, { createControl })).toThrow(ProfileDocumentNotReadyError);
+    expect(createControl).not.toHaveBeenCalled();
   });
 });

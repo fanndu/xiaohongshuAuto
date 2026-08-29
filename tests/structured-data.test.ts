@@ -149,16 +149,19 @@ describe('parseStructuredPage', () => {
 
   it('returns the empty result for missing, malformed, or wrong-shaped state', () => {
     document.body.innerHTML = '<script>window.__INITIAL_STATE__ = {broken;</script>';
-    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', profile: null, notes: [] });
+    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', identityStatus: 'missing', hasProfileEvidence: false, hasNotesContainer: false, profile: null, notes: [] });
 
     document.body.innerHTML = '<script>window.otherState = {}</script>';
-    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', profile: null, notes: [] });
+    expect(parseStructuredPage(document, location.href)).toEqual({ userId: '', identityStatus: 'missing', hasProfileEvidence: false, hasNotesContainer: false, profile: null, notes: [] });
 
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
       user: { userPageData: { basicInfo: [], interactions: {}, notes: {} } },
     })};</script>`;
     expect(parseStructuredPage(document, location.href)).toEqual({
       userId: '',
+      identityStatus: 'missing',
+      hasProfileEvidence: false,
+      hasNotesContainer: false,
       profile: {
         profileUrl: location.href,
         accountName: '',
@@ -428,7 +431,40 @@ describe('parseStructuredPage', () => {
       }, interactions: [], notes: [] } },
     })};</script>`;
 
-    expect(parseStructuredPage(document, location.href).userId).toBe('from-basic');
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'conflict' });
+  });
+
+  it('marks conflicting structured identity aliases unsafe instead of choosing one', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userId: 'alice', userPageData: { userId: 'alice', basicInfo: { userId: 'bob', nickname: 'Bob' }, interactions: [], notes: [] } },
+    })};</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'conflict' });
+  });
+
+  it('maps current nested user notes through noteCard wrappers', () => {
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({
+      user: { userId: 'u1', userPageData: { basicInfo: { nickname: 'U1' }, interactions: [], notes: [] }, notes: [[{
+        noteCard: { noteId: 'nested-current', displayTitle: 'Current nested note', type: 'normal', cover: { urlDefault: 'https://img.example/current.jpg' }, interactInfo: { likedCount: '7' } },
+      }]] },
+    })};</script>`;
+    expect(parseStructuredPage(document, location.href).notes).toMatchObject([{
+      id: 'nested-current', title: 'Current nested note', type: 'image', likes: { raw: '7', value: 7 }, coverUrl: 'https://img.example/current.jpg',
+    }]);
+  });
+
+  it('recognizes whitespace assignments and ignores comment-only candidates before budgets', () => {
+    structuredStateTestHooks.reset();
+    const valid = { user: { userPageData: { userId: 'u1', basicInfo: { nickname: 'U1' }, interactions: [], notes: [] } } };
+    const comments = Array.from({ length: STRUCTURED_STATE_LIMITS.maxCandidateScripts }, () => '<script>// window.__INITIAL_STATE__ = {}</script>').join('');
+    document.body.innerHTML = `${comments}<script>window . __INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'u1', identityStatus: 'valid' });
+    expect(structuredStateTestHooks.parseCalls()).toBe(1);
+  });
+
+  it('does not let an oversized comment-only decoy starve a later valid state', () => {
+    const valid = { user: { userPageData: { userId: 'u1', basicInfo: { nickname: 'U1' }, interactions: [], notes: [] } } };
+    document.body.innerHTML = `<script>/* window.__INITIAL_STATE__ = {};${' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1)} */</script><script>window.__INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'u1', identityStatus: 'valid' });
   });
 
   it('skips unrelated scripts before Acorn and caches unchanged candidate script text', () => {
@@ -453,7 +489,7 @@ describe('parseStructuredPage', () => {
     const accepted = Array.from({ length: STRUCTURED_STATE_LIMITS.maxCandidateScripts }, (_, index) =>
       `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state(`accepted-${index}`))};</script>`).join('');
     document.body.innerHTML = `${accepted}<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('beyond-count'))};</script>`;
-    expect(parseStructuredPage(document, location.href).userId).toBe(`accepted-${STRUCTURED_STATE_LIMITS.maxCandidateScripts - 1}`);
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted' });
 
     const oversized = ' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1);
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('oversized'))};${oversized}</script><script>window.__INITIAL_STATE__ = ${JSON.stringify(state('after-oversized'))};</script>`;
@@ -464,7 +500,7 @@ describe('parseStructuredPage', () => {
       `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('within-budget'))};${padding}</script>`,
       `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('beyond-byte-budget'))};${padding}</script>`,
     ].join('');
-    expect(parseStructuredPage(document, location.href).userId).toBe('within-budget');
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted' });
   });
 
   it('falls back when a later wrong-shaped assignment has a huge RHS', () => {

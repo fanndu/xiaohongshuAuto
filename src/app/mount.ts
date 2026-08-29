@@ -3,7 +3,7 @@ import { formatLocalDateTime } from '../domain/normalize';
 import { canonicalProfileRoute } from '../domain/routes';
 import type { CollectionResult } from '../domain/types';
 import type { ScrollEnvironment } from '../collection/scroll-coordinator';
-import { isRecognizedDomProfile, parseDomPage } from '../parsing/dom';
+import { parseDomPage } from '../parsing/dom';
 import { mergeProfile } from '../parsing/merge';
 import { parseStructuredPage } from '../parsing/structured-data';
 import { FloatingControl, type UiActions } from '../ui/floating-control';
@@ -44,14 +44,16 @@ export function mountCollector(
     const readPages = () => {
       const structured = parseStructuredPage(document, profileUrl);
       const dom = parseDomPage(document, profileUrl);
-      if (structured.userId) {
-        // A conflicting explicit state proves this DOM belongs to a stale SPA route.
-        if (structured.userId !== route.key) throw new ProfileDocumentNotReadyError();
-        return { structured, dom };
-      }
-      // Without an explicit structured identity, do not use any state-derived profile or notes.
-      if (!isRecognizedDomProfile(document)) throw new ProfileDocumentNotReadyError();
-      return { structured: { userId: '', profile: null, notes: [] }, dom };
+      const structuredCurrent = structured.identityStatus === 'valid' && structured.userId === route.key
+        && structured.hasProfileEvidence && structured.hasNotesContainer;
+      const domCurrent = dom.identityStatus === 'valid' && dom.userId === route.key
+        && dom.hasProfileEvidence && dom.hasWorksContainer;
+      // Sources are independently route-bound. A stale source can never enrich a current one.
+      if (!structuredCurrent && !domCurrent) throw new ProfileDocumentNotReadyError();
+      return {
+        structured: structuredCurrent ? structured : { profile: null, notes: [] },
+        dom: domCurrent ? dom : { profile: {}, notes: [] },
+      };
     };
     // Validate before creating controls so lifecycle polling can retry a loading/error document cleanly.
     readPages();

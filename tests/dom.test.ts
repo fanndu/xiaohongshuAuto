@@ -11,6 +11,10 @@ describe('parseDomPage', () => {
     document.body.innerHTML = fixture;
 
     expect(parseDomPage(document, profileUrl)).toEqual({
+      userId: 'azhe',
+      identityStatus: 'valid',
+      hasProfileEvidence: true,
+      hasWorksContainer: true,
       profile: {
         profileUrl,
         accountName: '旅行摄影阿哲',
@@ -326,6 +330,10 @@ describe('parseDomPage', () => {
 
     expect(() => parseDomPage(document, profileUrl)).not.toThrow();
     expect(parseDomPage(document, profileUrl)).toEqual({
+      userId: '',
+      identityStatus: 'missing',
+      hasProfileEvidence: false,
+      hasWorksContainer: false,
       profile: {
         profileUrl,
         accountName: '',
@@ -353,6 +361,31 @@ describe('parseDomPage', () => {
       { id: 'unknown', type: 'unknown' },
       { id: 'video', type: 'video' },
       { id: 'image', type: 'image' },
+    ]);
+  });
+
+  it('uses only explicit root identifiers and self links for DOM route identity', () => {
+    document.body.innerHTML = `
+      <section class="user" data-user-id="alice"><a href="/user/profile/alice">Alice</a><span class="user-name">Alice</span><section class="feeds-page"></section></section>
+    `;
+    expect(parseDomPage(document, profileUrl)).toMatchObject({
+      userId: 'alice', identityStatus: 'valid', hasProfileEvidence: true, hasWorksContainer: true,
+    });
+
+    document.body.innerHTML = '<div class="user-info"><span class="user-name">Generic name</span><section class="feeds-page"></section></div>';
+    expect(parseDomPage(document, profileUrl)).toMatchObject({ userId: '', identityStatus: 'missing' });
+  });
+
+  it('treats conflicting explicit media evidence as unknown and does not infer type from broad aria text', () => {
+    document.body.innerHTML = `
+      <article class="note-item" data-note-type="image"><a href="/explore/image"><span aria-label="我的视频剪辑教程"></span></a></article>
+      <article class="note-item" aria-label="视频"><a href="/explore/exact-video"></a></article>
+      <article class="note-item" data-note-type="image"><a href="/explore/conflict"></a><span class="video-icon"></span></article>
+    `;
+    expect(parseDomPage(document, profileUrl).notes.map(note => ({ id: note.id, type: note.type }))).toEqual([
+      { id: 'image', type: 'image' },
+      { id: 'exact-video', type: 'video' },
+      { id: 'conflict', type: 'unknown' },
     ]);
   });
 });
