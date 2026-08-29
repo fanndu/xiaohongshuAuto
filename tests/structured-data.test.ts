@@ -263,7 +263,7 @@ describe('parseStructuredPage', () => {
     expect(result.notes).toEqual([]);
   });
 
-  it('truncates excessive notes and skips oversized state scripts', () => {
+  it('truncates excessive notes and fails closed for oversized state candidates', () => {
     const notes = Array.from({ length: 10_001 }, (_, index) => ({ id: `item-${index}` }));
     const bounded = {
       user: { userPageData: { basicInfo: { nickname: '有界资料' }, interactions: [], notes } },
@@ -284,7 +284,7 @@ describe('parseStructuredPage', () => {
       `<script>window.__INITIAL_STATE__ = ${oversized};</script>`,
       `<script>window.__INITIAL_STATE__ = ${JSON.stringify(later)};</script>`,
     ].join('');
-    expect(parseStructuredPage(document, location.href).profile?.accountName).toBe('稍后资料');
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ identityStatus: 'budget_exhausted', profile: null });
   });
 
   it('keeps escaped delimiters and literal undefined strings intact', () => {
@@ -467,6 +467,23 @@ describe('parseStructuredPage', () => {
     expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'u1', identityStatus: 'valid' });
   });
 
+  it('fails closed when a newer oversized script contains a real state assignment', () => {
+    const alice = { user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } } };
+    const bob = { user: { userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [] } } };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(alice)};</script><script>window . __INITIAL_STATE__ = ${JSON.stringify(bob)};${' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1)}</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted', profile: null });
+  });
+
+  it('does not count identifier-prefix decoys against the candidate budget', () => {
+    structuredStateTestHooks.reset();
+    const valid = { user: { userPageData: { userId: 'u1', basicInfo: { nickname: 'U1' }, interactions: [], notes: [] } } };
+    const decoys = Array.from({ length: STRUCTURED_STATE_LIMITS.maxCandidateScripts }, () =>
+      '<script>notwindow.__INITIAL_STATE__ = {};$window.__INITIAL_STATE__ = {};obj.window.__INITIAL_STATE__ = {};</script>').join('');
+    document.body.innerHTML = `${decoys}<script>window . __INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'u1', identityStatus: 'valid' });
+    expect(structuredStateTestHooks.parseCalls()).toBe(1);
+  });
+
   it('skips unrelated scripts before Acorn and caches unchanged candidate script text', () => {
     structuredStateTestHooks.reset();
     const state = { user: { userPageData: { userId: 'u1', basicInfo: {}, interactions: [], notes: [] } } };
@@ -493,7 +510,7 @@ describe('parseStructuredPage', () => {
 
     const oversized = ' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1);
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(state('oversized'))};${oversized}</script><script>window.__INITIAL_STATE__ = ${JSON.stringify(state('after-oversized'))};</script>`;
-    expect(parseStructuredPage(document, location.href).userId).toBe('after-oversized');
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted' });
 
     const padding = ' '.repeat(Math.ceil(STRUCTURED_STATE_LIMITS.maxCandidateScriptChars / 2));
     document.body.innerHTML = [

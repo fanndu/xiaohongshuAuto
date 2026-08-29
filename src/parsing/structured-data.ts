@@ -215,7 +215,9 @@ function hasInitialStateAssignment(source: string): boolean {
       const end = skipRegex(source, index);
       if (end > index + 1) { index = end; continue; }
     }
-    if (source.startsWith('window', index)
+    const previous = source[index - 1] ?? '';
+    const standaloneWindow = !/[\p{ID_Continue}$\u200C\u200D.]/u.test(previous);
+    if (standaloneWindow && source.startsWith('window', index)
       && /^window\s*\.\s*__INITIAL_STATE__\s*=/.test(source.slice(index))) return true;
     index += 1;
   }
@@ -227,8 +229,9 @@ function readInitialState(doc: Document): { state: unknown; budgetExhausted: boo
   let candidateChars = 0;
   for (const script of doc.querySelectorAll('script')) {
     const source = script.textContent ?? '';
-    // Oversized decoys are skipped before they can consume either candidate budget.
-    if (source.length > MAX_SCRIPT_CHARS || !hasInitialStateAssignment(source)) continue;
+    // This constant-memory lexical pass distinguishes a real oversized assignment from a literal/comment decoy.
+    if (!hasInitialStateAssignment(source)) continue;
+    if (source.length > MAX_SCRIPT_CHARS) return { state: null, budgetExhausted: true };
     if (candidates.length >= MAX_CANDIDATE_SCRIPTS || candidateChars + source.length > MAX_CANDIDATE_SCRIPT_CHARS) {
       return { state: null, budgetExhausted: true };
     }

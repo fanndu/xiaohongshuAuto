@@ -100,10 +100,10 @@ describe('collector module integration', () => {
         id: 'abc123',
         title: '雪山日出',
         noteUrl: 'https://www.xiaohongshu.com/explore/abc123',
-        type: 'video',
+        type: 'unknown',
         likes: { raw: '2.3万', value: 23000 },
         coverUrl: 'https://img.example/cover.jpg',
-        exportNotes: [],
+        exportNotes: ['作品类型证据冲突'],
       }],
     }]);
 
@@ -127,7 +127,7 @@ describe('collector module integration', () => {
     expect(notesSheet.getCell('B2').text).toBe('雪山日出');
     expect(notesSheet.getCell('C2').hyperlink).toBe('https://www.xiaohongshu.com/explore/abc123');
     expect(notesSheet.getCell('D2').text).toBe('abc123');
-    expect(notesSheet.getCell('E2').text).toBe('视频');
+    expect(notesSheet.getCell('E2').text).toBe('未知');
     expect(notesSheet.getCell('F2').text).toBe('2.3万');
     expect(notesSheet.getCell('G2').value).toBe(23000);
     expect(notesSheet.getCell('H2').hyperlink).toBe('https://img.example/cover.jpg');
@@ -167,7 +167,7 @@ describe('collector module integration', () => {
 
     expect(exported).toHaveLength(1);
     expect(exported[0]?.notes.map(note => ({ id: note.id, title: note.title, type: note.type }))).toEqual([
-      { id: 'abc123', title: '雪山日出', type: 'video' },
+      { id: 'abc123', title: '雪山日出', type: 'unknown' },
       { id: 'new-virtualized', title: '新作品', type: 'image' },
     ]);
     cleanup();

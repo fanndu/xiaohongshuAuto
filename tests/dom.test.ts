@@ -388,4 +388,14 @@ describe('parseDomPage', () => {
       { id: 'conflict', type: 'unknown' },
     ]);
   });
+
+  it.each([
+    ['image-first', '<article class="note-item" data-note-type="image"><a href="/explore/same"></a></article><article class="note-item"><a href="/explore/same"></a><span class="video-icon"></span></article>'],
+    ['video-first', '<article class="note-item"><a href="/explore/same"></a><span class="video-icon"></span></article><article class="note-item" data-note-type="image"><a href="/explore/same"></a></article>'],
+  ])('keeps duplicate %s media evidence conflict-safe', (_order, cards) => {
+    document.body.innerHTML = `<section class="feeds-page">${cards}</section>`;
+    expect(parseDomPage(document, profileUrl).notes).toMatchObject([{
+      id: 'same', type: 'unknown', exportNotes: ['作品类型证据冲突'],
+    }]);
+  });
 });

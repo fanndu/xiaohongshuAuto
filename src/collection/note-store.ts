@@ -1,4 +1,5 @@
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
+import { mergedExportNotes, mergeNoteType } from '../domain/note-type';
 import type { CountValue, NoteRecord, NoteType } from '../domain/types';
 
 type NoteInput = Partial<NoteRecord>;
@@ -44,12 +45,6 @@ function countStrength(value: CountValue): number {
   if (value.raw === '隐藏') return 2;
   if (value.raw) return 1;
   return 0;
-}
-
-function strongestType(left: NoteType, right: NoteType): NoteType {
-  if (left === 'video' || right === 'video') return 'video';
-  if (left === 'image' || right === 'image') return 'image';
-  return 'unknown';
 }
 
 /** Keeps one insertion-ordered, immutable-from-callers representation of every note. */
@@ -157,17 +152,18 @@ export class NoteStore {
   }
 
   private merge(existing: NoteRecord, later: NoteRecord): NoteRecord {
+    const media = mergeNoteType(existing.type, later.type, existing.exportNotes, later.exportNotes);
     return {
       // Identity fields are deliberately first-seen and therefore stable.
       id: existing.id || later.id,
       noteUrl: existing.noteUrl || later.noteUrl,
       title: later.title || existing.title,
-      type: strongestType(existing.type, later.type),
+      type: media.type,
       likes: countStrength(later.likes) >= countStrength(existing.likes)
         ? { ...later.likes }
         : { ...existing.likes },
       coverUrl: later.coverUrl || existing.coverUrl,
-      exportNotes: [...new Set([...existing.exportNotes, ...later.exportNotes])],
+      exportNotes: mergedExportNotes(existing.exportNotes, later.exportNotes, media.conflict),
     };
   }
 }

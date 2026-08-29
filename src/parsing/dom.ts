@@ -1,4 +1,5 @@
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
+import { mergedExportNotes, mergeNoteType, NOTE_TYPE_CONFLICT } from '../domain/note-type';
 import { canonicalProfileRoute } from '../domain/routes';
 import type { NoteRecord, ProfileRecord } from '../domain/types';
 
@@ -183,31 +184,30 @@ function mapNote(card: Element, base: string): NoteRecord | null {
   };
   const videoMarker = hasMarker('video');
   const imageMarker = hasMarker('image');
+  const typeConflict = videoMarker && imageMarker;
   return {
     id: link.id,
     title: firstText(card, ['[data-testid="note-title"]', '.title', '[class*="title"]', 'h2', 'h3']),
     noteUrl: link.noteUrl,
     // Covers are common to video and image posts, so an <img> is not type evidence.
-    type: videoMarker === imageMarker ? 'unknown' : videoMarker ? 'video' : 'image',
+    type: typeConflict ? 'unknown' : videoMarker ? 'video' : imageMarker ? 'image' : 'unknown',
     likes: parseCount(likesRaw(card)),
     coverUrl: imageUrl(card, ['a.cover img', 'img'], base),
-    exportNotes: [],
+    exportNotes: typeConflict ? [NOTE_TYPE_CONFLICT] : [],
   };
 }
 
 function mergeDuplicateNote(existing: NoteRecord, later: NoteRecord): NoteRecord {
-  // Later child cards win title/likes/cover conflicts, while video evidence is monotonic.
+  const media = mergeNoteType(existing.type, later.type, existing.exportNotes, later.exportNotes);
   return {
     ...existing,
     id: later.id || existing.id,
     noteUrl: later.noteUrl || existing.noteUrl,
     title: later.title || existing.title,
-    type: existing.type === 'video' || later.type === 'video'
-      ? 'video'
-      : later.type === 'unknown' ? existing.type : later.type,
+    type: media.type,
     likes: later.likes.raw ? later.likes : existing.likes,
     coverUrl: later.coverUrl || existing.coverUrl,
-    exportNotes: [...new Set([...existing.exportNotes, ...later.exportNotes])],
+    exportNotes: mergedExportNotes(existing.exportNotes, later.exportNotes, media.conflict),
   };
 }
 

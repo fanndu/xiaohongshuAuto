@@ -167,7 +167,7 @@ describe('NoteStore', () => {
     expect(store.values()[0]?.noteUrl).toBe('https://www.xiaohongshu.com/user/profile/a');
   });
 
-  it('enriches duplicates while keeping stable identifiers and monotonic type evidence', () => {
+  it('enriches duplicates while quarantining contradictory type evidence', () => {
     const store = new NoteStore();
 
     store.addMany([note({
@@ -197,10 +197,10 @@ describe('NoteStore', () => {
       id: 'rich-note',
       noteUrl: 'https://www.xiaohongshu.com/explore/rich-note',
       title: 'Later title',
-      type: 'video',
+      type: 'unknown',
       likes: { raw: '13', value: 13 },
       coverUrl: 'https://img.example/later-cover.jpg',
-      exportNotes: ['first warning', 'second warning'],
+      exportNotes: ['first warning', 'second warning', '作品类型证据冲突'],
     })]);
   });
 
@@ -259,5 +259,28 @@ describe('NoteStore', () => {
     snapshot[0]!.title = 'changed outside';
     snapshot[0]!.exportNotes.push('outside');
     expect(store.values()[0]).toMatchObject({ title: '', exportNotes: ['warning'] });
+  });
+
+  it.each([
+    ['image then video', ['image', 'video']],
+    ['video then image', ['video', 'image']],
+  ] as const)('keeps %s evidence conflict durable across later merges', (_order, [first, second]) => {
+    const store = new NoteStore();
+    store.addMany([note({ id: 'media-conflict', type: first })]);
+    store.addMany([note({ id: 'media-conflict', type: second })]);
+    store.addMany([note({ id: 'media-conflict', type: 'video' })]);
+
+    expect(store.values()).toMatchObject([{
+      id: 'media-conflict', type: 'unknown', exportNotes: ['作品类型证据冲突'],
+    }]);
+  });
+
+  it('enriches missing type evidence with one positive source without adding a conflict warning', () => {
+    const store = new NoteStore();
+    store.addMany([note({ id: 'unknown-then-image', type: 'unknown' })]);
+    store.addMany([note({ id: 'unknown-then-image', type: 'image' })]);
+    expect(store.values()).toMatchObject([{
+      id: 'unknown-then-image', type: 'image', exportNotes: [],
+    }]);
   });
 });
