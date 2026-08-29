@@ -189,6 +189,8 @@ function splitCurrentCandidates(candidates: readonly Element[], userId: string, 
   const exact: Element[] = [];
   const unbound: Element[] = [];
   for (const candidate of candidates) {
+    // Candidate-local nested scopes can be stale even when the initially selected root is current.
+    if (!validatedProfileScope(candidate, userId, base)) continue;
     const identity = elementIdentity(candidate, base);
     if (identity.identityStatus === 'valid' && identity.userId === userId) exact.push(candidate);
     else if (identity.identityStatus === 'missing') unbound.push(candidate);

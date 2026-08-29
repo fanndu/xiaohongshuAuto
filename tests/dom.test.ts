@@ -555,4 +555,30 @@ describe('parseDomPage', () => {
       profile: { following: { raw: '7', value: 7 } },
     });
   });
+
+  it('rejects an exact Bob header nested inside an Alice-owned child scope', () => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section class="profile-page" data-user-id="alice">
+        <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Forged Bob</span></section>
+      </section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasProfileEvidence: false, hasWorksContainer: false, notes: [], profile: { accountName: '' },
+    });
+  });
+
+  it.each([
+    ['exact Bob works', 'data-user-id="bob"'],
+    ['unbound works', ''],
+  ])('rejects %s nested inside an Alice-owned child scope', (_name, identity) => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <section class="profile-page" data-user-id="alice">
+        <section class="feeds-page" ${identity}><article class="note-item"><a href="/explore/forged-note"></a></article></section>
+      </section>
+    </main>`;
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({
+      hasWorksContainer: false, notes: [],
+    });
+  });
 });
