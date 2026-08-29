@@ -82,43 +82,57 @@ export function createProfileRouteLifecycle(mount: (url: string, signal: AbortSi
   sync(url: string): void;
   dispose(): void;
 } {
-  let activeKey: string | undefined;
-  let lifecycleController: AbortController | undefined;
-  let unmount: Unmount | undefined;
+  let active: { key: string; controller: AbortController; cleanup: Unmount } | undefined;
+  let disposed = false;
+  let transition = 0;
 
   const unmountActive = (): void => {
-    const cleanup = unmount;
-    const controller = lifecycleController;
+    const current = active;
     // State must be clear before callbacks run: either callback may throw or re-enter.
-    unmount = undefined;
-    lifecycleController = undefined;
-    activeKey = undefined;
+    active = undefined;
     try {
-      cleanup?.();
+      current?.cleanup();
     } finally {
-      controller?.abort();
+      current?.controller.abort();
+    }
+  };
+
+  const discardStaleMount = (cleanup: Unmount, controller: AbortController): void => {
+    try {
+      cleanup();
+    } finally {
+      controller.abort();
     }
   };
 
   return {
     sync(url) {
+      if (disposed) return;
       const route = canonicalProfileRoute(url);
-      if (route?.key === activeKey) return;
+      if (route?.key === active?.key) return;
+      const token = ++transition;
       unmountActive();
-      if (!route) return;
+      if (disposed || token !== transition || !route) return;
 
       const controller = new AbortController();
       try {
         const cleanup = mount(route.url, controller.signal);
-        unmount = cleanup;
-        lifecycleController = controller;
-        activeKey = route.key;
+        // A cleanup or mount callback can re-enter sync/dispose. Its later transition
+        // owns the lifecycle; this older mount must not overwrite it or leak resources.
+        if (disposed || token !== transition) {
+          discardStaleMount(cleanup, controller);
+          return;
+        }
+        active = { key: route.key, controller, cleanup };
       } catch (error) {
         controller.abort();
         throw error;
       }
     },
     dispose() {
+      if (disposed) return;
+      disposed = true;
+      transition += 1;
       unmountActive();
     },
   };
@@ -129,50 +143,44 @@ interface RouteLifecycle {
   dispose(): void;
 }
 
-function navigationDestinationKey(value: string): string | null {
-  const profile = canonicalProfileRoute(value);
-  if (profile) return `profile:${profile.key}`;
-  try {
-    const url = new URL(value);
-    return `${url.origin}${url.pathname}`;
-  } catch {
-    return null;
-  }
-}
-
-/** Reconciles WXT notifications only after location.href has committed to that destination. */
+/** Samples committed location.href; WXT notifications only wake this monitor early. */
 export function createProfileNavigationSynchronizer(lifecycle: RouteLifecycle, getLocationHref: () => string): {
   syncInitial(): void;
   notify(expectedUrl: string): void;
   dispose(): void;
 } {
-  let generation = 0;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let interval: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
+
+  const reconcile = (): void => {
+    if (disposed) return;
+    try {
+      lifecycle.sync(getLocationHref());
+    } catch {
+      // A transient mount failure must not stop later committed-location retries.
+    }
+  };
+
+  const startMonitoring = (): void => {
+    if (interval === undefined) interval = setInterval(reconcile, 250);
+  };
 
   return {
     syncInitial() {
-      if (!disposed) lifecycle.sync(getLocationHref());
-    },
-    notify(expectedUrl) {
       if (disposed) return;
-      const expected = navigationDestinationKey(expectedUrl);
-      if (!expected) return;
-      const token = ++generation;
-      if (timer !== undefined) clearTimeout(timer);
-      timer = setTimeout(() => {
-        timer = undefined;
-        if (disposed || token !== generation) return;
-        const current = getLocationHref();
-        if (navigationDestinationKey(current) === expected) lifecycle.sync(current);
-      }, 0);
+      startMonitoring();
+      reconcile();
+    },
+    notify(_expectedUrl) {
+      if (disposed) return;
+      startMonitoring();
+      reconcile();
     },
     dispose() {
       if (disposed) return;
       disposed = true;
-      generation += 1;
-      if (timer !== undefined) clearTimeout(timer);
-      timer = undefined;
+      if (interval !== undefined) clearInterval(interval);
+      interval = undefined;
       lifecycle.dispose();
     },
   };

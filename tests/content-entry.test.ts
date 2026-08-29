@@ -142,10 +142,70 @@ describe('createProfileRouteLifecycle', () => {
     expect(() => lifecycle.dispose()).not.toThrow();
     expect(unmount).toHaveBeenCalledOnce();
   });
+
+  it('keeps a reentrant mount as the active route and tears down the stale outer mount', () => {
+    const calls: string[] = [];
+    let lifecycle!: ReturnType<typeof createProfileRouteLifecycle>;
+    const mount = vi.fn((url: string, signal: AbortSignal) => {
+      calls.push(`mount:${url}`);
+      if (url.endsWith('/alice')) lifecycle.sync('https://www.xiaohongshu.com/user/profile/bob');
+      return () => calls.push(`unmount:${url}:${signal.aborted}`);
+    });
+    lifecycle = createProfileRouteLifecycle(mount);
+
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/bob');
+    lifecycle.dispose();
+
+    expect(calls).toEqual([
+      'mount:https://www.xiaohongshu.com/user/profile/alice',
+      'mount:https://www.xiaohongshu.com/user/profile/bob',
+      'unmount:https://www.xiaohongshu.com/user/profile/alice:false',
+      'unmount:https://www.xiaohongshu.com/user/profile/bob:false',
+    ]);
+    expect(mount).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets a reentrant cleanup sync win over the outer route transition', () => {
+    const calls: string[] = [];
+    let lifecycle!: ReturnType<typeof createProfileRouteLifecycle>;
+    const mount = vi.fn((url: string) => {
+      calls.push(`mount:${url}`);
+      return () => {
+        calls.push(`unmount:${url}`);
+        if (url.endsWith('/alice')) lifecycle.sync('https://www.xiaohongshu.com/user/profile/cathy');
+      };
+    });
+    lifecycle = createProfileRouteLifecycle(mount);
+
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice');
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/bob');
+    lifecycle.dispose();
+
+    expect(calls).toEqual([
+      'mount:https://www.xiaohongshu.com/user/profile/alice',
+      'unmount:https://www.xiaohongshu.com/user/profile/alice',
+      'mount:https://www.xiaohongshu.com/user/profile/cathy',
+      'unmount:https://www.xiaohongshu.com/user/profile/cathy',
+    ]);
+  });
+
+  it('prevents a cleanup from remounting after disposal begins', () => {
+    let lifecycle!: ReturnType<typeof createProfileRouteLifecycle>;
+    const mount = vi.fn((url: string) => () => {
+      if (url.endsWith('/alice')) lifecycle.sync('https://www.xiaohongshu.com/user/profile/bob');
+    });
+    lifecycle = createProfileRouteLifecycle(mount);
+    lifecycle.sync('https://www.xiaohongshu.com/user/profile/alice');
+
+    lifecycle.dispose();
+
+    expect(mount).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('createProfileNavigationSynchronizer', () => {
-  it('waits for the actual location to match and coalesces canceled, superseded, and out-of-order notifications', () => {
+  it('reconciles a precommit notification after its destination commits without another event', () => {
     vi.useFakeTimers();
     try {
       let current = 'https://www.xiaohongshu.com/user/profile/alice';
@@ -153,19 +213,57 @@ describe('createProfileNavigationSynchronizer', () => {
       const dispose = vi.fn();
       const navigation = createProfileNavigationSynchronizer({ sync, dispose }, () => current);
 
-      navigation.notify('https://www.xiaohongshu.com/user/profile/bob'); // canceled before commit
-      vi.runAllTimers();
-      expect(sync).not.toHaveBeenCalled();
-
+      navigation.syncInitial();
       navigation.notify('https://www.xiaohongshu.com/user/profile/bob');
-      navigation.notify('https://www.xiaohongshu.com/user/profile/cathy');
-      current = 'https://www.xiaohongshu.com/user/profile/cathy?tab=notes';
-      vi.runAllTimers();
+      vi.advanceTimersByTime(250); // WXT event arrived before the browser committed.
+      current = 'https://www.xiaohongshu.com/user/profile/bob?tab=notes';
+      vi.advanceTimersByTime(250);
 
-      expect(sync).toHaveBeenCalledTimes(1);
       expect(sync).toHaveBeenCalledWith(current);
       navigation.dispose();
       expect(dispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('observes a canceled destination that later commits with no second WXT event', () => {
+    vi.useFakeTimers();
+    try {
+      let current = 'https://www.xiaohongshu.com/user/profile/alice';
+      const sync = vi.fn();
+      const navigation = createProfileNavigationSynchronizer({ sync, dispose: vi.fn() }, () => current);
+      navigation.syncInitial();
+      navigation.notify('https://www.xiaohongshu.com/user/profile/bob'); // first navigation is canceled
+      vi.advanceTimersByTime(250);
+      current = 'https://www.xiaohongshu.com/user/profile/bob'; // retry emits no event
+      vi.advanceTimersByTime(250);
+
+      expect(sync).toHaveBeenLastCalledWith(current);
+      navigation.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses only actual location when stale or out-of-order notifications arrive', () => {
+    vi.useFakeTimers();
+    try {
+      let current = 'https://www.xiaohongshu.com/user/profile/cathy';
+      const sync = vi.fn();
+      const navigation = createProfileNavigationSynchronizer({ sync, dispose: vi.fn() }, () => current);
+      navigation.syncInitial();
+      sync.mockClear();
+
+      navigation.notify('https://www.xiaohongshu.com/user/profile/alice');
+      navigation.notify('https://www.xiaohongshu.com/user/profile/bob');
+      vi.advanceTimersByTime(250);
+
+      expect(sync).toHaveBeenCalled();
+      expect(sync).toHaveBeenCalledWith(current);
+      expect(sync).not.toHaveBeenCalledWith('https://www.xiaohongshu.com/user/profile/alice');
+      expect(sync).not.toHaveBeenCalledWith('https://www.xiaohongshu.com/user/profile/bob');
+      navigation.dispose();
     } finally {
       vi.useRealTimers();
     }
@@ -181,12 +279,35 @@ describe('createProfileNavigationSynchronizer', () => {
         () => 'https://www.xiaohongshu.com/user/profile/bob',
       );
 
-      navigation.notify('https://www.xiaohongshu.com/user/profile/bob');
+      navigation.syncInitial();
+      sync.mockClear();
       navigation.dispose();
+
+      // A committed route after invalidation cannot be mounted by the monitor.
+      navigation.notify('https://www.xiaohongshu.com/user/profile/bob');
       vi.runAllTimers();
 
       expect(sync).not.toHaveBeenCalled();
       expect(dispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('contains one reconciliation failure so the next monitor tick can retry', () => {
+    vi.useFakeTimers();
+    try {
+      const sync = vi.fn()
+        .mockImplementationOnce(() => { throw new Error('mount failed'); });
+      const navigation = createProfileNavigationSynchronizer(
+        { sync, dispose: vi.fn() },
+        () => 'https://www.xiaohongshu.com/user/profile/bob',
+      );
+
+      expect(() => navigation.syncInitial()).not.toThrow();
+      vi.advanceTimersByTime(250);
+      expect(sync).toHaveBeenCalledTimes(2);
+      navigation.dispose();
     } finally {
       vi.useRealTimers();
     }
