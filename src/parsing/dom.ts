@@ -194,7 +194,7 @@ function splitCurrentCandidates(candidates: readonly Element[], userId: string, 
     if (!validatedProfileScope(candidate, userId, base)) continue;
     const identity = elementIdentity(candidate, base);
     if (identity.identityStatus === 'valid' && identity.userId === userId) exact.push(candidate);
-    else if (identity.identityStatus === 'missing') unbound.push(candidate);
+    else if (identity.identityStatus === 'missing' && !candidate.matches('#userPostedFeeds')) unbound.push(candidate);
     // Explicit conflicts and different identities are never eligible.
   }
   return { exact, unbound };

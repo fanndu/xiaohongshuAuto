@@ -593,4 +593,17 @@ describe('parseDomPage', () => {
       hasProfileEvidence: false, hasWorksContainer: false, notes: [],
     });
   });
+
+  it.each([
+    ['identity-less', ''],
+    ['explicit Bob', 'data-user-id="bob"'],
+  ])('accepts #userPostedFeeds only when it is %s-bound', (_name, identity) => {
+    document.body.innerHTML = `<main class="profile-page" data-user-id="bob">
+      <section data-testid="profile-header" data-user-id="bob"><span class="user-name">Bob</span></section>
+      <section id="userPostedFeeds" ${identity}><article class="note-item"><a href="/explore/live-feed"></a></article></section>
+    </main>`;
+    const page = parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/bob');
+    if (identity) expect(page).toMatchObject({ hasWorksContainer: true, notes: [{ id: 'live-feed' }] });
+    else expect(page).toMatchObject({ hasWorksContainer: false, notes: [] });
+  });
 });

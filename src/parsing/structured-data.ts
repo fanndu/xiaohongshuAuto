@@ -465,12 +465,17 @@ export function parseStructuredPage(doc: Document, profileUrl: string): Structur
   const pageNotes = own(userPageData, 'notes');
   const siblingNotes = own(page, 'notes');
   const parentIdentity = string(own(page, 'userId'));
-  const selectedNotes = pageNotesExplicit && supportedNotesContainer(pageNotes) ? pageNotes
-    : !pageNotesExplicit && activeStatePresent && activeBucketValid && Boolean(userId)
-      && Boolean(parentIdentity) && parentIdentity === userId && activeQueryIdentity === userId ? activeBucket
-      : !pageNotesExplicit && !activeStatePresent && Boolean(userId) && Boolean(parentIdentity) && parentIdentity === userId
-        && supportedNotesContainer(siblingNotes) ? siblingNotes
-      : undefined;
+  let selectedNotes: unknown;
+  if (activeStatePresent) {
+    selectedNotes = activeBucketValid && Boolean(userId)
+      && Boolean(parentIdentity) && parentIdentity === userId && activeQueryIdentity === userId
+      ? activeBucket : undefined;
+  } else if (pageNotesExplicit && supportedNotesContainer(pageNotes)) {
+    selectedNotes = pageNotes;
+  } else if (Boolean(userId) && Boolean(parentIdentity) && parentIdentity === userId
+    && supportedNotesContainer(siblingNotes)) {
+    selectedNotes = siblingNotes;
+  }
   const mappedNotes = identityStatus !== 'conflict' && identityStatus !== 'budget_exhausted' && selectedNotes !== undefined
     ? flattenNotes(selectedNotes).map(note => safelyMapNote(note, userId)) : [];
   const noteConflict = mappedNotes.some(result => result.conflict);

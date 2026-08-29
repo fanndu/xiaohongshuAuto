@@ -677,7 +677,7 @@ describe('parseStructuredPage', () => {
     [{ index: 0, query: 'note' }, { 0: { userId: 'alice' } }],
   ])('fails closed for invalid active multi-bucket state', (activeTab, noteQueries) => {
     document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify({ user: {
-      userId: 'bob', userPageData: { basicInfo: { nickname: 'Bob' }, interactions: [] }, activeTab, noteQueries,
+      userId: 'bob', userPageData: { basicInfo: { nickname: 'Bob' }, interactions: [], notes: [{ id: 'stale-page-data' }] }, activeTab, noteQueries,
       notes: [[{ id: 'should-not-use' }]],
     } })};</script>`;
     expect(parseStructuredPage(document, 'https://www.xiaohongshu.com/user/profile/bob')).toMatchObject({ hasNotesContainer: false, notes: [] });
