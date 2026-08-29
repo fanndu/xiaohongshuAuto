@@ -1,4 +1,5 @@
 import { parse } from 'acorn-loose';
+import { tokenizer } from 'acorn';
 import type { Node } from 'acorn';
 import { extractNoteId, normalizeNoteUrl, parseCount } from '../domain/normalize';
 import type { NoteRecord, NoteType, ProfileRecord } from '../domain/types';
@@ -168,60 +169,34 @@ function lastStateFromScript(source: string): unknown {
   return latest?.state ?? null;
 }
 
-function skipQuoted(source: string, start: number, quote: string): number {
-  let index = start + 1;
-  while (index < source.length) {
-    if (source[index] === '\\') index += 2;
-    else if (source[index] === quote) return index + 1;
-    else index += 1;
-  }
-  return source.length;
-}
+type CandidateClassification = 'candidate' | 'none' | 'ambiguous';
 
-function skipRegex(source: string, start: number): number {
-  let index = start + 1;
-  let inClass = false;
-  while (index < source.length) {
-    const char = source[index] ?? '';
-    if (char === '\\') index += 2;
-    else if (char === '[') { inClass = true; index += 1; }
-    else if (char === ']') { inClass = false; index += 1; }
-    else if (char === '/' && !inClass) {
-      index += 1;
-      while (/[a-z]/i.test(source[index] ?? '')) index += 1;
-      return index;
-    } else if (/\r|\n/.test(char)) return start + 1;
-    else index += 1;
+/** Uses Acorn's lexer only: comments, regexes, templates, and division are classified without an AST. */
+function classifyInitialStateCandidate(source: string): CandidateClassification {
+  if (!source.includes('__INITIAL_STATE__')) return 'none';
+  try {
+    const tokens = tokenizer(source, { ecmaVersion: 'latest' });
+    let previousLabel = '';
+    let stage = 0;
+    let found = false;
+    for (;;) {
+      const token = tokens.getToken();
+      const label = token.type.label;
+      if (label === 'eof') return found ? 'candidate' : 'none';
+      const identifier = label === 'name' && (token as { value?: unknown }).value;
+      if (stage === 1) stage = label === '.' ? 2 : 0;
+      else if (stage === 2) stage = identifier === '__INITIAL_STATE__' ? 3 : 0;
+      else if (stage === 3) {
+        if (label === '=') found = true;
+        stage = 0;
+      }
+      if (identifier === 'window' && previousLabel !== '.' && previousLabel !== '?.') stage = 1;
+      previousLabel = label;
+    }
+  } catch {
+    // A marker-bearing script that cannot be lexed is unsafe to classify as an older route's state.
+    return 'ambiguous';
   }
-  return start + 1;
-}
-
-/** Detects an assignment token outside quoted/comment/regex payloads without executing script text. */
-function hasInitialStateAssignment(source: string): boolean {
-  for (let index = 0; index < source.length;) {
-    const char = source[index] ?? '';
-    if (char === '"' || char === "'" || char === '`') { index = skipQuoted(source, index, char); continue; }
-    if (char === '/' && source[index + 1] === '/') {
-      const newline = source.indexOf('\n', index + 2);
-      index = newline === -1 ? source.length : newline + 1;
-      continue;
-    }
-    if (char === '/' && source[index + 1] === '*') {
-      const end = source.indexOf('*/', index + 2);
-      index = end === -1 ? source.length : end + 2;
-      continue;
-    }
-    if (char === '/') {
-      const end = skipRegex(source, index);
-      if (end > index + 1) { index = end; continue; }
-    }
-    const previous = source[index - 1] ?? '';
-    const standaloneWindow = !/[\p{ID_Continue}$\u200C\u200D.]/u.test(previous);
-    if (standaloneWindow && source.startsWith('window', index)
-      && /^window\s*\.\s*__INITIAL_STATE__\s*=/.test(source.slice(index))) return true;
-    index += 1;
-  }
-  return false;
 }
 
 function readInitialState(doc: Document): { state: unknown; budgetExhausted: boolean } {
@@ -229,8 +204,9 @@ function readInitialState(doc: Document): { state: unknown; budgetExhausted: boo
   let candidateChars = 0;
   for (const script of doc.querySelectorAll('script')) {
     const source = script.textContent ?? '';
-    // This constant-memory lexical pass distinguishes a real oversized assignment from a literal/comment decoy.
-    if (!hasInitialStateAssignment(source)) continue;
+    const classification = classifyInitialStateCandidate(source);
+    if (classification === 'ambiguous') return { state: null, budgetExhausted: true };
+    if (classification === 'none') continue;
     if (source.length > MAX_SCRIPT_CHARS) return { state: null, budgetExhausted: true };
     if (candidates.length >= MAX_CANDIDATE_SCRIPTS || candidateChars + source.length > MAX_CANDIDATE_SCRIPT_CHARS) {
       return { state: null, budgetExhausted: true };

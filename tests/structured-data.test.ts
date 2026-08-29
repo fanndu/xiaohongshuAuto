@@ -484,6 +484,30 @@ describe('parseStructuredPage', () => {
     expect(structuredStateTestHooks.parseCalls()).toBe(1);
   });
 
+  it('recognizes a real assignment between same-line division operators before failing an oversized candidate closed', () => {
+    const alice = { user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } } };
+    const bob = { user: { userPageData: { userId: 'bob', basicInfo: { nickname: 'Bob' }, interactions: [], notes: [] } } };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(alice)};</script><script>const a = 8 / 2; window . __INITIAL_STATE__ = ${JSON.stringify(bob)}; const b = 8 / 2;${' '.repeat(STRUCTURED_STATE_LIMITS.maxScriptChars + 1)}</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted', profile: null });
+  });
+
+  it('does not count spaced member-property decoys against the candidate budget', () => {
+    structuredStateTestHooks.reset();
+    const valid = { user: { userPageData: { userId: 'u1', basicInfo: { nickname: 'U1' }, interactions: [], notes: [] } } };
+    const decoys = Array.from({ length: STRUCTURED_STATE_LIMITS.maxCandidateScripts }, () =>
+      '<script>obj . window . __INITIAL_STATE__ = {};</script>').join('');
+    document.body.innerHTML = `${decoys}<script>window . __INITIAL_STATE__ = ${JSON.stringify(valid)};</script>`;
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: 'u1', identityStatus: 'valid' });
+    expect(structuredStateTestHooks.parseCalls()).toBe(1);
+  });
+
+  it('fails closed when a marker-bearing script cannot be tokenized', () => {
+    const alice = { user: { userPageData: { userId: 'alice', basicInfo: { nickname: 'Alice' }, interactions: [], notes: [] } } };
+    document.body.innerHTML = `<script>window.__INITIAL_STATE__ = ${JSON.stringify(alice)};</script><script></script>`;
+    document.querySelectorAll('script')[1]!.textContent = 'window.__INITIAL_STATE__ = @';
+    expect(parseStructuredPage(document, location.href)).toMatchObject({ userId: '', identityStatus: 'budget_exhausted', profile: null });
+  });
+
   it('skips unrelated scripts before Acorn and caches unchanged candidate script text', () => {
     structuredStateTestHooks.reset();
     const state = { user: { userPageData: { userId: 'u1', basicInfo: {}, interactions: [], notes: [] } } };
