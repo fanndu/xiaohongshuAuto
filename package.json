@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "wxt",
-    "build": "wxt build",
+    "build": "wxt build && node scripts/verify-chromium-utf8.mjs",
     "zip": "wxt zip",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
