@@ -142,12 +142,13 @@ const PROFILE_ROOT_SELECTORS = [
   '[data-testid="profile-page"]',
   '[data-testid="profile-scope"]',
   '.profile-page',
+  '#userPageContainer',
   '[data-testid="profile-header"]',
   'section.user',
   '.user-info',
 ];
 const PROFILE_HEADER_SELECTORS = ['[data-testid="profile-header"]', 'section.user', '.user-info'];
-const PROFILE_SCOPE_SELECTOR = '[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page';
+const PROFILE_SCOPE_SELECTOR = '[data-testid="profile-page"], [data-testid="profile-scope"], .profile-page, #userPageContainer';
 const OWNERSHIP_ROOT_SELECTOR = PROFILE_ROOT_SELECTORS.join(',');
 
 function elementIdentity(element: Element, base: string): { userId: string; identityStatus: PageIdentityStatus } {
@@ -418,6 +419,7 @@ export function parseDomPage(
       '[data-testid="avatar"] img',
       'img.user-avatar',
       '.user-avatar img',
+      'img.user-image',
       'img[class*="avatar"]',
       '[class*="avatar"] img',
     ], profileUrl) : '',

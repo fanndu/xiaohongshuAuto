@@ -377,6 +377,59 @@ describe('parseDomPage', () => {
     expect(parseDomPage(document, profileUrl)).toMatchObject({ userId: '', identityStatus: 'missing' });
   });
 
+  it('binds the current user-page container when the header identity is supplied by its works feed', () => {
+    document.body.innerHTML = `
+      <div id="userPageContainer" class="ai-mode user-page">
+        <div class="user">
+          <div class="user-info">
+            <img class="user-image" src="https://img.example/live-avatar.jpg">
+            <div class="user-name">Live Alice</div>
+            <span class="user-redId">小红书号：live_alice</span>
+            <span class="user-IP">IP属地：美国</span>
+            <div class="user-desc">Current profile layout</div>
+            <div class="data-info">
+              <div class="data-item"><span>关注</span><strong>7</strong></div>
+              <div class="data-item"><span>粉丝</span><strong>8万</strong></div>
+              <div class="data-item"><span>获赞与收藏</span><strong>9.5万</strong></div>
+            </div>
+          </div>
+        </div>
+        <div id="userPostedFeeds" class="feeds-container">
+          <section class="note-item">
+            <a href="/explore/live-note"></a>
+            <a class="cover" href="/user/profile/alice/live-note"><img src="https://img.example/live-cover.jpg"></a>
+            <a class="title" href="/user/profile/alice/live-note">Live note</a>
+            <a class="author" href="/user/profile/alice">Live Alice</a>
+            <div class="like-wrapper"><span class="count">123</span></div>
+          </section>
+        </div>
+      </div>
+    `;
+
+    expect(parseDomPage(document, 'https://www.xiaohongshu.com/user/profile/alice')).toMatchObject({
+      userId: 'alice',
+      identityStatus: 'valid',
+      hasProfileEvidence: true,
+      hasWorksContainer: true,
+      profile: {
+        accountName: 'Live Alice',
+        redId: 'live_alice',
+        avatarUrl: 'https://img.example/live-avatar.jpg',
+        description: 'Current profile layout',
+        ipLocation: '美国',
+        following: { raw: '7', value: 7 },
+        followers: { raw: '8万', value: 80000 },
+        likedAndCollected: { raw: '9.5万', value: 95000 },
+      },
+      notes: [{
+        id: 'live-note',
+        title: 'Live note',
+        likes: { raw: '123', value: 123 },
+        coverUrl: 'https://img.example/live-cover.jpg',
+      }],
+    });
+  });
+
   it('treats conflicting explicit media evidence as unknown and does not infer type from broad aria text', () => {
     document.body.innerHTML = `
       <article class="note-item" data-note-type="image"><a href="/explore/image"><span aria-label="我的视频剪辑教程"></span></a></article>
